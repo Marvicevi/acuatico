@@ -333,8 +333,8 @@ def mostrar_asistencia():
 def registrar_tiempos():
     """Muestra el contenido de la página de Registro de Tiempos."""
     st.header("Registrar Nuevos Tiempos ⏱️")
-    if st.session_state.user_role != 'Entrenador':
-        st.warning("Esta sección es solo para entrenadores.")
+    if st.session_state.user_role not in ['Entrenador', 'Master', 'Directiva']:
+        st.warning("Esta sección es solo para el equipo técnico y directivo.")
         return
 
     nadadores = st.session_state.nadadores_df['nombre'].tolist()
