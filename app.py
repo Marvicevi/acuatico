@@ -84,8 +84,13 @@ st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 @st.cache_resource
 def init_connection():
     try:
-        url = st.secrets.get("SUPABASE_URL", "")
-        key = st.secrets.get("SUPABASE_KEY", "")
+        if "supabase" in st.secrets:
+            url = st.secrets["supabase"].get("SUPABASE_URL", "")
+            key = st.secrets["supabase"].get("SUPABASE_KEY", "")
+        else:
+            url = st.secrets.get("SUPABASE_URL", "")
+            key = st.secrets.get("SUPABASE_KEY", "")
+            
         if "LLAVE_ANON" in key or "URL_DE_TU_PROYECTO" in url or not url: 
             return None
         return create_client(url, key)
