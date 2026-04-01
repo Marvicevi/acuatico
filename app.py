@@ -169,8 +169,10 @@ def mostrar_dashboard():
             st.header("Dashboard del Entrenador 📋")
             
         user_info = st.session_state.user_info
-        # Directiva obtiene todos los grupos; Entrenador solo los suyos
+        # Directiva obtiene todos los grupos; Entrenador solo los suyos (o todos si tiene el permiso 'Todos')
         grupos_asignados = user_info['grupos_asignados'] if st.session_state.user_role == 'Entrenador' else st.session_state.nadadores_df['grupo'].unique().tolist()
+        if st.session_state.user_role == 'Entrenador' and ('Todos' in user_info['grupos_asignados'] or not user_info['grupos_asignados']):
+            grupos_asignados = st.session_state.nadadores_df['grupo'].unique().tolist()
         
         # Opciones de resumen
         grupo_seleccionado = st.selectbox("Selecciona un grupo para ver el resumen masivo:", ["Todos"] + grupos_asignados)
@@ -292,6 +294,8 @@ def mostrar_asistencia():
 
     user_info = st.session_state.user_info
     grupos_asignados = user_info['grupos_asignados']
+    if 'Todos' in grupos_asignados or not grupos_asignados:
+        grupos_asignados = st.session_state.nadadores_df['grupo'].unique().tolist()
     
     col1, col2 = st.columns(2)
     with col1:
@@ -500,7 +504,7 @@ def panel_master():
             with c1:
                 nuevo_nombre = st.text_input("Nombre Completo")
                 nuevo_email = st.text_input("Correo Electrónico")
-                nuevos_grupos = st.multiselect("Grupos Asignados (Opcional)", ["Competitivo", "Precompetitivo", "Formativo", "Elite", "Master"])
+                nuevos_grupos = st.multiselect("Grupos Asignados (Opcional)", ["Todos", "Competitivo", "Precompetitivo", "Formativo", "Elite", "Master"])
             with c2:
                 nueva_clave = st.text_input("Contraseña Temporal", type="password")
                 nuevo_rol = st.selectbox("Rol del Usuario", ["Nadador", "Entrenador", "Directiva", "Master"])
