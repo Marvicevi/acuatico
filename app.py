@@ -553,11 +553,11 @@ if not st.session_state.logged_in:
     st.write("---")
     
     st.subheader("🔑 Iniciar Sesión")
-    email_login = st.text_input("Correo electrónico", placeholder="ejemplo@club.cl")
+    email_login = st.text_input("Correo electrónico", placeholder="ejemplo@club.cl").strip().lower()
     pass_login = st.text_input("Contraseña", type="password")
     
     if st.button("Entrar", type="primary"):
-        user_match = st.session_state.usuarios_df[st.session_state.usuarios_df['email'] == email_login]
+        user_match = st.session_state.usuarios_df[st.session_state.usuarios_df['email'].str.lower() == email_login]
         if not user_match.empty:
             user_info = user_match.iloc[0]
             if user_info['clave'] == pass_login:
