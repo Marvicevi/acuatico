@@ -1,57 +1,65 @@
-# Sistema de Progreso: Club Acuático Valdivia 🏊‍♂️
+# Club Acuático Valdivia - Sistema de Progreso de Nadadores 🏊‍♂️
 
-Bienvenido al repositorio del Sistema de Progreso de Nadadores. Esta aplicación web permite a entrenadores, directiva, master y nadadores realizar un seguimiento detallado y basado en datos del rendimiento en los distintos estilos de natación a lo largo del tiempo.
+**Plataforma Web (PWA)** desarrollada nativamente en Python (Streamlit) e integrada con una base de datos relacional (Supabase/PostgreSQL) para la gestión deportiva integral de atletas, consolidando asistencia, análisis de tiempos y proyección de marcas minimas mediante gráficas de radar (Spider Charts).
 
-## Arquitectura y Distribución (PWA)
+---
 
-Esta aplicación está construida sobre **Python** y **Streamlit** y se conecta a una base de datos relacional gratuita en **Supabase** (PostgreSQL).
+## 👥 Sistema de Perfiles y Roles (Permisos)
 
-**Estrategia de Distribución:** No es necesario pagar licencias de App Store (Apple) ni Google Play. Al ser desplegada en *Streamlit Community Cloud*, la aplicación funciona como una **PWA (Progressive Web App)** nativa y responsiva.
-1. Los usuarios acceden a través de un simple enlace URL (ej: *miapp.streamlit.app*).
-2. En sus teléfonos móviles (Safari o Chrome), seleccionan "Agregar a la Pantalla de Inicio".
-3. Al instante, tendrán el ícono del club en la pantalla de sus celulares, abriéndose como una aplicación nativa, a pantalla completa y libre de distracciones.
+La aplicación utiliza un esquema de acceso cerrado por seguridad:
+* **No hay registro público.** Nadie puede crear su propia cuenta desde el exterior.
+* Todas las contraseñas están almacenadas en base de datos. Cada usuario puede modificar su propia contraseña en cualquier momento usando el menú "⚙️ Mi Cuenta".
 
-## Roles del Sistema (Simulación OAuth)
-El proyecto incluye un flujo de validación basado en correos electrónicos.
-- **Master**: Valida a los usuarios nuevos que se registren simulando el inicio con su cuenta de Google.
-- **Entrenador**: Visualiza el resumen de sus grupos (ej. *Elite* o *Juvenil*), evalúa distancias contra marcas mínimas, y toma la asistencia con un solo clic.
-- **Directiva**: Posee visión global (Solo lectura) sobre todo el desempeño del club.
-- **Nadador**: Puede visualizar únicamente su propio progreso.
+Existen **4 niveles de acceso** con interfaces condicionales:
 
-## Configuración de Base de Datos (Supabase)
-Esta aplicación utiliza Supabase (PostgreSQL) para alojar todos los datos. Sigue estos pasos para configurarlo:
+### 1. 👑 Master (Super Administrador)
+Tiene control absoluto y global del club y la aplicación.
+* **Acceso exclusivo** a la pestaña **"🛡️ Admin Usuarios"**, desde la cual puede *crear* cuentas para el resto del equipo (Entrenadores, Directiva, Nadadores).
+* Puede asignar explícitamente a qué "Grupos" tiene acceso y autoridad cada entrenador al momento de crear sus cuentas.
+* Visualiza todos los perfiles, todos los tableros analíticos y puede ingresar tiempos o asistencias para cualquier miembro.
 
-1. Ingresa a [supabase.com](https://supabase.com/).
-2. Crea un **New Project**. En la pantalla de creación:
-   - **Enable Data API**: **DEJA MARCADA** esta opción (es la que nos permite conectar la aplicación Streamlit directo a la base de datos).
-   - **Enable automatic RLS**: **DESMARCA** esta opción. Para esta etapa de prototipo, el sistema validará los accesos y los roles internamente. Si lo dejas activado, Supabase bloqueará las lecturas (Row Level Security) y no podrás ver ninguna marca ni asistencia en tu aplicación.
-3. Ve a la pestaña **SQL Editor** en el panel izquierdo de Supabase. Abre un *New Query*, pega todo el código del archivo local `schema_supabase.sql` y ejecútalo (Run). Esto construirá todas tus tablas automáticamente.
-4. Para finalizar, ve al menú **Project Settings** (el engranaje) -> **API** y copia los dos valores clave: tu `Project URL` y tu `Project API Key (anon-public)`.
+### 2. 📋 Entrenador
+Su visión está acotada estrictamente a los **Grupos Asignados** bajo su tutela.
+* **📊 Dashboard:** Análisis tabular y gráfico individual de los alumnos de su grupo.
+* **🗓️ Asistencia:** Interfaz de tabla ágil para tomar lista diaria por grupo.
+* **👥 Perfiles:** Interfaz gráfica para registrar nuevos nadadores, editar su categoría o cambiar su género (Menú desplegable estricto de Supabase).
+* **⏱️ Registrar Tiempos:** Inserción guiada o por carga masiva usando archivos Excel/CSV de las competencias.
+* **⚙️ Configurar Marcas:** Control sobre las métricas deportivas (tiempos mínimos) de la temporada para que los atletas se comparen.
 
-## Requisitos y Configuración Local
+### 3. 👁️ Directiva (Presidente / Directorio)
+Perfil diseñado puramente para supervisión a gran escala y soporte administrativo.
+* **Supervisión Global:** Tienen acceso al **📊 Dashboard Global**, pudiendo ver resúmenes generales de *todo el club* (todos los grupos del Master y Entrenadores). Esta vista inicialmente es de Solo Lectura.
+* **Colaboradores Operativos:** Para apoyar la labor técnica, la Directiva cuenta con permisos para ayudar a subir planillas masivas de **⏱️ Registrar Tiempos** y ayudar a **⚙️ Configurar Marcas Mínimas** base.
+* Tienen bloqueada la toma de 🗓️ Asistencia y la creación biográfica de 👥 Perfiles, salvaguardando ese registro para los técnicos.
 
-1. Prepara tu entorno virtual (si no lo tienes activo):
-    ```bash
-    source .venv/bin/activate
-    ```
-2. Instala las dependencias:
-    ```bash
-    pip install -r requirements.txt
-    ```
-3. Crea un archivo llamado `.streamlit/secrets.toml` y pega tu URL y Llave recién creadas:
-    ```toml
-    [supabase]
-    SUPABASE_URL = "https://TU_URL.supabase.co"
-    SUPABASE_KEY = "TU_LLAVE_ANONIMA"
-    ```
-4. Lanza la aplicación localmente de prueba:
-    ```bash
-    streamlit run app.py
-    ```
+### 4. 🏊‍♂️ Nadador (Próximamente disponible en UI total)
+Perfil de lectura personal.
+* Visualización hermética: El nadador solamente puede ver sus propios registros, sus asistencias y cómo rinden sus últimos tiempos (Spider Chart) en relación a su categoría y categorías de competidores superiores.
+* Bloqueo a la información o registros de sus compañeros.
 
-## Despliegue en la Nube
-Para lanzar esta app al público de manera gratuita:
-1. Sube este directorio a un repositorio **público** en **GitHub**.
-2. Ingresa a `share.streamlit.io` y vincula tu cuenta de GitHub.
-3. Despliega la aplicación apuntando hacia el archivo principal `app.py`.
-4. En el panel de control de Streamlit, ve a  `Settings` > `Secrets` y pega el mismo contenido de tu archivo `.streamlit/secrets.toml` local.
+---
+
+## 🚀 Despliegue en la Nube (Deployment Instructions)
+
+### 1. Configuración de Base de Datos (Supabase)
+1. Créate una cuenta en [Supabase](https://supabase.com/).
+2. Crea un nuevo proyecto.
+3. Ve a la sección **SQL Editor**. Abre el archivo local `schema_supabase.sql` que se encuentra en esta carpeta, cópialo entero y ejecútalo (Run).
+   * Este script generará automáticamente las tablas (`usuarios`, `nadadores`, `tiempos`, `asistencias`, `marcas_minimas`), los Tipos Desplegables ENUM (`tipo_rol`, `tipo_sexo`), y **creará tu primer usuario administrador** (`master@club.cl`).
+4. Ve a *Settings > API* y copia dos cosas: El **URL** del proyecto y el **`anon` public API Key**.
+
+### 2. Configuración del Servidor y UI (Streamlit Cloud)
+1. Sube todo el contenido de esta carpeta (este repositorio) a [GitHub](https://github.com).
+2. Ingresa a [Streamlit Community Cloud](https://share.streamlit.io/) e inicia sesión con tu cuenta de GitHub.
+3. Selecciona **New App** y despliega a partir del repositorio recién subido. Usa siempre la ruta primaria: `app.py`.
+4. **Vínculo Seguro (Secrets):**
+   * Antes de presionar el último botón *Deploy*, ve a la sección inferior de **Advanced Settings...**.
+   * Pega allí las llaves de Supabase usando el siguiente formato exacto (TOML):
+   ```toml
+   [supabase]
+   SUPABASE_URL = "https://tu-url.supabase.co"
+   SUPABASE_KEY = "tu-llave-anonima-publica"
+   ```
+5. Guarda (Save) y Ejecuta (Deploy).
+
+*Listo! El sistema está vivo, enlazado, configurado y asegurado para todos tus dispositivos.*
