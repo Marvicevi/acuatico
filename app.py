@@ -452,9 +452,9 @@ def gestionar_nadadores():
 def configurar_marcas():
     """Muestra el contenido de la configuración de Marcas Mínimas por Categoría."""
     st.header("⚙️ Configuración de Marcas Mínimas")
-    # Asegurar que solo el Entrenador (o Master) accedan, según la solicitud final:
-    if st.session_state.user_role not in ['Entrenador', 'Master']:
-        st.error("No tienes permiso de Entrenador para configurar metas del equipo.")
+    # Asegurar que Entrenador, Master o Directiva accedan:
+    if st.session_state.user_role not in ['Entrenador', 'Master', 'Directiva']:
+        st.error("No tienes permiso para configurar las metas del equipo.")
         return
         
     st.write("Agrega, edita o elimina las marcas mínimas objetivo para cada estilo y categoría de tus nadadores. Estas metas se verán de inmediato en las visualizaciones de gráficas (Dashboard).")
@@ -500,6 +500,7 @@ def panel_master():
             with c1:
                 nuevo_nombre = st.text_input("Nombre Completo")
                 nuevo_email = st.text_input("Correo Electrónico")
+                nuevos_grupos = st.multiselect("Grupos Asignados (Opcional)", ["Competitivo", "Precompetitivo", "Formativo", "Elite", "Master"])
             with c2:
                 nueva_clave = st.text_input("Contraseña Temporal", type="password")
                 nuevo_rol = st.selectbox("Rol del Usuario", ["Nadador", "Entrenador", "Directiva", "Master"])
@@ -514,7 +515,8 @@ def panel_master():
                             try:
                                 supabase.table("usuarios").insert({
                                     "nombre": nuevo_nombre, "email": nuevo_email, 
-                                    "clave": nueva_clave, "rol": nuevo_rol, "validado": True
+                                    "clave": nueva_clave, "rol": nuevo_rol, "validado": True,
+                                    "grupos_asignados": nuevos_grupos
                                 }).execute()
                                 st.success(f"¡Cuenta para {nuevo_nombre} creada exitosamente en BD! Ya le puedes enviar su correo y contraseña provisional.")
                             except Exception as e: st.error(f"Error BD: {e}")
@@ -584,7 +586,9 @@ else:
     # --- Menú de Navegación Condicional ---
     opciones_menu = ["📊 Dashboard"]
     if st.session_state.user_role in ['Entrenador', 'Master']:
-        opciones_menu.extend(["🗓️ Asistencia", "⏱️ Registrar Tiempos", "👥 Perfiles", "⚙️ Configurar Marcas"])
+        opciones_menu.extend(["🗓️ Asistencia", "👥 Perfiles"])
+    if st.session_state.user_role in ['Entrenador', 'Master', 'Directiva']:
+        opciones_menu.extend(["⏱️ Registrar Tiempos", "⚙️ Configurar Marcas"])
         
     if st.session_state.user_role == 'Master':
         opciones_menu.append("🛡️ Admin Usuarios")
