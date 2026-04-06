@@ -136,8 +136,31 @@ def cargar_datos():
             m_df = pd.DataFrame(mar) if mar else pd.DataFrame(columns=['categoria', 'estilo', 'sexo', 'segundos'])
             
             if not u_df.empty: u_df.rename(columns={'id': 'id_usuario'}, inplace=True)
-            if not n_df.empty: n_df.rename(columns={'id': 'id_nadador'}, inplace=True)
-            
+
+            # Normalizar columnas de nadadores
+            if not n_df.empty:
+                if 'id' in n_df.columns and 'id_nadador' not in n_df.columns:
+                    n_df.rename(columns={'id': 'id_nadador'}, inplace=True)
+                elif 'id_nadador' not in n_df.columns:
+                    n_df.insert(0, 'id_nadador', range(1, len(n_df) + 1))
+
+            # Normalizar columnas de tiempos (compatibilidad con esquemas viejos y nuevos)
+            if not t_df.empty:
+                _rn = {}
+                if 'nadador_id' in t_df.columns and 'id_nadador' not in t_df.columns:
+                    _rn['nadador_id'] = 'id_nadador'
+                if 'tiempo' in t_df.columns and 'tiempo_formateado' not in t_df.columns:
+                    _rn['tiempo'] = 'tiempo_formateado'
+                if 'segundos' in t_df.columns and 'segundos_totales' not in t_df.columns:
+                    _rn['segundos'] = 'segundos_totales'
+                if _rn:
+                    t_df.rename(columns=_rn, inplace=True)
+
+            # Normalizar columnas de marcas_minimas
+            if not m_df.empty:
+                if 'segundos_objetivo' in m_df.columns and 'segundos' not in m_df.columns:
+                    m_df.rename(columns={'segundos_objetivo': 'segundos'}, inplace=True)
+
             # Si hay usuarios en Base de Datos anulamos el fallback
             if not u_df.empty:
                 return n_df, t_df, u_df, m_df
@@ -208,8 +231,11 @@ def mostrar_dashboard():
         st.subheader("Resumen de Marcas del Grupo")
         resumen_data = []
         for _, nad in nadadores_del_grupo.iterrows():
-            tiempos_nad = st.session_state.tiempos_df[st.session_state.tiempos_df['id_nadador'] == nad['id_nadador']]
-            mejores = tiempos_nad.groupby('estilo')['segundos'].min().to_dict() if not tiempos_nad.empty else {}
+            _id_col = 'id_nadador' if 'id_nadador' in st.session_state.tiempos_df.columns else 'id'
+            _id_nad = nad.get('id_nadador', nad.get('id', None))
+            tiempos_nad = st.session_state.tiempos_df[st.session_state.tiempos_df[_id_col] == _id_nad] if _id_nad is not None else st.session_state.tiempos_df.iloc[0:0]
+            _sec = 'segundos_totales' if 'segundos_totales' in tiempos_nad.columns else 'segundos'
+            mejores = tiempos_nad.groupby('estilo')[_sec].min().to_dict() if not tiempos_nad.empty else {}
             resumen_data.append({
             'Nadador': nad['nombre'], 
             'Categoría': nad['categoria'], 
@@ -251,7 +277,8 @@ def mostrar_dashboard():
                 
                 for cat in marcas_filtradas['categoria'].unique():
                     subset = marcas_filtradas[marcas_filtradas['categoria'] == cat]
-                    marcas_obj[cat] = dict(zip(subset['estilo'], subset['segundos']))
+                    _sec_m = 'segundos' if 'segundos' in subset.columns else 'segundos_objetivo'
+                    marcas_obj[cat] = dict(zip(subset['estilo'], subset[_sec_m]))
                     cats_plot.append(cat)
                 
                 # Por seguridad si la BD aún no tiene marcas insertadas
@@ -260,7 +287,8 @@ def mostrar_dashboard():
                     cats_plot = ['Temporal']
                 
                 # Encontrar el mejor tiempo actual del nadador (en segundos)
-                mejores_tiempos = tiempos_nadador.groupby('estilo')['segundos'].min().to_dict() if not tiempos_nadador.empty else {}
+                _sec2 = 'segundos_totales' if 'segundos_totales' in tiempos_nadador.columns else 'segundos'
+                mejores_tiempos = tiempos_nadador.groupby('estilo')[_sec2].min().to_dict() if not tiempos_nadador.empty else {}
                 categorias_estilos = list(set([e for cat in marcas_obj.values() for e in cat.keys()])) 
                 if not categorias_estilos: categorias_estilos = ['50m Libre']
                 
