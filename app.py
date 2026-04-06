@@ -13,6 +13,19 @@ try:
 except ImportError:
     pass
 
+def convertir_tiempo_a_segundos(tiempo_str):
+    """Convierte formato MM:SS,MS a float de segundos totales."""
+    try:
+        # Reemplazamos la coma por punto para que Python lo entienda como decimal
+        tiempo_limpio = tiempo_str.replace(',', '.')
+        if ':' in tiempo_limpio:
+            minutos, resto = tiempo_limpio.split(':')
+            return float(int(minutos) * 60 + float(resto))
+        return float(tiempo_limpio)
+    except Exception:
+        return 0.0
+
+
 # --- Configuración de la página ---
 st.set_page_config(
     page_title="Club de Natación Acuático Valdivia",
@@ -122,10 +135,10 @@ def cargar_datos():
             
     # --- FALLBACK DE PROTOTIPO ---
     nadadores_df = pd.DataFrame([
-        {'id_nadador': 1, 'nombre': 'Ana', 'grupo': 'Competitivo', 'categoria': 'Infantil B', 'sexo': 'Femenino'},
+        {'id_nadador': 1, 'nombre': 'Ana', 'grupo': 'Competitivo', 'categoria': 'Infantil B1', 'sexo': 'Femenino'},
         {'id_nadador': 2, 'nombre': 'Luis', 'grupo': 'Competitivo', 'categoria': 'Infantil A', 'sexo': 'Masculino'},
-        {'id_nadador': 3, 'nombre': 'Carla', 'grupo': 'Precompetitivo', 'categoria': 'Juvenil A', 'sexo': 'Femenino'},
-        {'id_nadador': 4, 'nombre': 'Pedro', 'grupo': 'Elite', 'categoria': 'Mayor', 'sexo': 'Masculino'},
+        {'id_nadador': 3, 'nombre': 'Carla', 'grupo': 'Precompetitivo', 'categoria': 'Juvenil A1', 'sexo': 'Femenino'},
+        {'id_nadador': 4, 'nombre': 'Pedro', 'grupo': 'Elite', 'categoria': 'Mayores', 'sexo': 'Masculino'},
     ])
     
     tiempos_df = pd.DataFrame([
@@ -186,8 +199,12 @@ def mostrar_dashboard():
         for _, nad in nadadores_del_grupo.iterrows():
             tiempos_nad = st.session_state.tiempos_df[st.session_state.tiempos_df['id_nadador'] == nad['id_nadador']]
             mejores = tiempos_nad.groupby('estilo')['segundos'].min().to_dict() if not tiempos_nad.empty else {}
-            resumen_data.append({'Nadador': nad['nombre'], 'Categoría': nad['categoria'], **{k: f"{v}s" for k, v in mejores.items()}})
+            resumen_data.append({
+            'Nadador': nad['nombre'], 
+            'Categoría': nad['categoria'], 
+            **{k: v for k, v in mejores.items()}})
             
+
         st.dataframe(pd.DataFrame(resumen_data).fillna('-'), use_container_width=True)
         
         st.markdown("---")
@@ -335,86 +352,122 @@ def mostrar_asistencia():
         st.success(f"Asistencia guardada para el {fecha_seleccionada.strftime('%d-%m-%Y')}. {len(presentes)} nadador(es) presente(s).")
 
 def registrar_tiempos():
-    """Muestra el contenido de la página de Registro de Tiempos."""
     st.header("Registrar Nuevos Tiempos ⏱️")
     if st.session_state.user_role not in ['Entrenador', 'Master', 'Directiva']:
-        st.warning("Esta sección es solo para el equipo técnico y directivo.")
+        st.warning("Sección restringida.")
         return
+
+    estilos_natacion = [
+        '50 Libre', '100 Libre', '200 Libre', '400 Libre', '800 Libre', '1500 Libre',
+        '50 Espalda', '100 Espalda', '200 Espalda', '50 Pecho', '100 Pecho', '200 Pecho',
+        '50 Mariposa', '100 Mariposa', '200 Mariposa', '100 IM', '200 IM', '400 IM'
+    ]
 
     nadadores = st.session_state.nadadores_df['nombre'].tolist()
     nadador_seleccionado = st.selectbox("Seleccionar Nadador:", nadadores)
 
-    tab1, tab2 = st.tabs(["Registro Manual", "Carga Masiva (Excel / CSV)"])
+    tab1, tab2 = st.tabs(["Registro Manual", "Carga Masiva"])
     
     with tab1:
         with st.form("form_tiempos"):
             col1, col2 = st.columns(2)
             with col1:
                 fecha = st.date_input("Fecha", datetime.today())
-                estilo = st.selectbox("Estilo de la prueba:", ["50m Libre", "100m Pecho", "200m Combinado", "100m Espalda", "50m Mariposa"])
+                estilo = st.selectbox("Estilo:", estilos_natacion)
             with col2:
                 lugar = st.text_input("Lugar / Competencia")
-                tiempo = st.text_input("Tiempo (formato MM:SS.ss)", "00:00.00")
+                tiempo_input = st.text_input("Tiempo (MM:SS,MS)", placeholder="01:05,50")
             
-            submitted = st.form_submit_button("Guardar Tiempo")
-            if submitted:
+            if st.form_submit_button("Guardar Tiempo"):
+                secs = convertir_tiempo_a_segundos(tiempo_input)
                 supabase = init_connection()
                 if supabase:
-                    try:
-                        pts = tiempo.replace('.', ':').split(':')
-                        secs = float(int(pts[0])*60 + int(pts[1]) + float(f"0.{pts[2]}")) if len(pts)==3 else 0.0
-                    except: secs = 0.0
-                    
                     id_nad = st.session_state.nadadores_df[st.session_state.nadadores_df['nombre'] == nadador_seleccionado].iloc[0]['id_nadador']
                     try:
+                        # Dentro del if submitted del form de tiempos:
                         supabase.table("tiempos").insert({
-                            "id_nadador": int(id_nad), "fecha": fecha.strftime('%Y-%m-%d'),
-                            "lugar": lugar, "estilo": estilo, "tiempo": tiempo, "segundos": secs
+                            "id_nadador": int(id_nad), 
+                            "fecha": fecha.strftime('%Y-%m-%d'),
+                            "lugar": lugar, 
+                            "estilo": estilo, 
+                            "tiempo_formateado": tiempo_input, # Nombre exacto de tu SQL
+                            "segundos_totales": secs        # Nombre exacto de tu SQL
                         }).execute()
+                        st.success(f"Guardado: {tiempo_input} ({secs}s)")
                     except Exception as e:
                         st.error(f"Error BD: {e}")
-                        
-                st.success(f"Tiempo de {tiempo} para {nadador_seleccionado} en {estilo} guardado.")
-                
+                else:
+                    st.success("Modo local: Tiempo guardado (simulado).")
+
     with tab2:
-        st.markdown("### Subir marcas mediante archivo")
-        st.write("Puedes descargar un modelo de CSV, llenarlo con las marcas de uno o múltiples nadadores y volver a subirlo aquí.")
+        st.markdown("### 📥 Descargar Plantilla y Cargar Datos")
+        st.write("Sigue estos pasos: 1. Baja el modelo, 2. Completa los datos (puedes borrar el ejemplo), 3. Sube el archivo.")
+        
         import io
-        plantilla_df = pd.DataFrame(columns=['id_nadador', 'fecha', 'lugar', 'estilo', 'tiempo'])
+        
+        # 1. CREAMOS LA LÍNEA DE EJEMPLO
+        # Importante: Los nombres de columnas deben coincidir con tu SQL (tiempo_formateado)
+        datos_ejemplo = {
+            'id_nadador': [1],  # El ID se encuentra en la pestaña 'Perfiles'
+            'fecha': ['2026-04-10'],
+            'lugar': ['Piscina Valdivia'],
+            'estilo': ['200 IM'], # Debe ser exacto al ENUM de la BD
+            'tiempo_formateado': ['03:30,50'] # El formato MM:SS,MS que pediste
+        }
+        
+        plantilla_df = pd.DataFrame(datos_ejemplo)
+        
+        # Preparamos el buffer para la descarga
         csv_buffer = io.StringIO()
         plantilla_df.to_csv(csv_buffer, index=False)
-        st.download_button(label="📥 Descargar Modelo CSV", data=csv_buffer.getvalue().encode('utf-8'), file_name="modelo_tiempos.csv", mime="text/csv")
         
-        uploaded_file = st.file_uploader("Sube el archivo Excel o CSV rellenado", type=["csv", "xlsx"])
+        st.download_button(
+            label="📥 Descargar Modelo CSV con Ejemplo", 
+            data=csv_buffer.getvalue().encode('utf-8'), 
+            file_name="modelo_carga_tiempos.csv", 
+            mime="text/csv"
+        )
+        
+        st.markdown("---")
+        
+        # 2. SECCIÓN DE CARGA
+        uploaded_file = st.file_uploader("Sube tu archivo corregido (CSV o Excel)", type=["csv", "xlsx"])
+        
         if uploaded_file is not None:
             try:
+                # Leer el archivo
                 if uploaded_file.name.endswith('.csv'):
                     df_cargado = pd.read_csv(uploaded_file)
                 else:
                     df_cargado = pd.read_excel(uploaded_file)
-                st.write("Vista previa de datos a cargar:")
+                
+                st.write("🔍 Vista previa de los datos a subir:")
                 st.dataframe(df_cargado, use_container_width=True)
-                if st.button("Confirmar e Insertar Tiempos", type="primary"):
+                
+                if st.button("🚀 Confirmar e Insertar en Base de Datos", type="primary"):
+                    # MAGIA: Convertimos la columna MM:SS,MS a segundos numéricos
+                    # Usamos la función convertir_tiempo_a_segundos que definimos al inicio
+                    df_cargado['segundos_totales'] = df_cargado['tiempo_formateado'].apply(convertir_tiempo_a_segundos)
+                    
                     supabase = init_connection()
                     if supabase:
-                        def parse_sec(t):
-                            try:
-                                pts = str(t).replace('.', ':').split(':')
-                                return float(int(pts[0])*60 + int(pts[1]) + float(f"0.{pts[2]}")) if len(pts)==3 else 0.0
-                            except: return 0.0
-                        
-                        df_cargado['segundos'] = df_cargado['tiempo'].apply(parse_sec)
                         try:
-                            # Filtro pre-inserción para evitar nulos
+                            # Convertimos a lista de diccionarios para Supabase
                             recs = df_cargado.to_dict('records')
-                            supabase.table("tiempos").insert(recs).execute()
-                            st.success(f"Se insertaron {len(df_cargado)} registros correctamente en BD.")
+                            
+                            # Insertamos masivamente
+                            resultado = supabase.table("tiempos").insert(recs).execute()
+                            
+                            st.success(f"✅ ¡Éxito! Se han registrado {len(recs)} tiempos correctamente.")
+                            st.balloons()
                         except Exception as e:
-                            st.error(f"Error de BD en subida masiva: {e}")
+                            st.error(f"❌ Error de Base de Datos: {e}")
                     else:
-                        st.success(f"Se insertaron {len(df_cargado)} registros correctamente (simulación).")
+                        st.info("💡 Modo Prototipo: Los datos se procesaron pero no hay conexión a Supabase.")
+            
             except Exception as e:
-                st.error(f"Error procesando el archivo: {e}")
+                st.error(f"❌ Error al procesar el archivo: {e}")
+                st.info("Asegúrate de no haber cambiado los nombres de las columnas en el CSV.")
 
 def gestionar_nadadores():
     """Muestra el panel de gestión de perfiles de los nadadores (categorías, grupo, sexo)."""
@@ -429,11 +482,15 @@ def gestionar_nadadores():
     if 'id' in df.columns:
         df = df.drop(columns=['id'])
         
+    # Definir categorías oficiales
+    cats_oficiales = ['Infantil A', 'Infantil B1', 'Infantil B2', 'Juvenil A1', 'Juvenil A2', 'Juvenil B', 'Mayores']
+
     edited_df = st.data_editor(
         df, 
         use_container_width=True, 
         num_rows="dynamic",
         column_config={
+            "categoria": st.column_config.SelectboxColumn("Categoría", options=cats_oficiales, required=True),
             "sexo": st.column_config.SelectboxColumn("Sexo", options=["Masculino", "Femenino"], required=True)
         }
     )
@@ -456,41 +513,84 @@ def gestionar_nadadores():
 def configurar_marcas():
     """Muestra el contenido de la configuración de Marcas Mínimas por Categoría."""
     st.header("⚙️ Configuración de Marcas Mínimas")
-    # Asegurar que Entrenador, Master o Directiva accedan:
+    
+    # 1. Verificación de permisos
     if st.session_state.user_role not in ['Entrenador', 'Master', 'Directiva']:
         st.error("No tienes permiso para configurar las metas del equipo.")
         return
         
-    st.write("Agrega, edita o elimina las marcas mínimas objetivo para cada estilo y categoría de tus nadadores. Estas metas se verán de inmediato en las visualizaciones de gráficas (Dashboard).")
+    st.info("ℹ️ Ingresa los tiempos en formato **MM:SS,MS** (Ejemplo: 01:05,50). La columna 'Segundos' se calculará automáticamente al guardar.")
     
+    # 2. Definición de opciones para los desplegables (Matching con la DB)
+    cats_oficiales = [
+        'Infantil A', 'Infantil B1', 'Infantil B2', 
+        'Juvenil A1', 'Juvenil A2', 'Juvenil B', 'Mayores'
+    ]
+    
+    estilos_oficiales = [
+        '50 Libre', '100 Libre', '200 Libre', '400 Libre', '800 Libre', '1500 Libre',
+        '50 Espalda', '100 Espalda', '200 Espalda',
+        '50 Pecho', '100 Pecho', '200 Pecho',
+        '50 Mariposa', '100 Mariposa', '200 Mariposa',
+        '100 IM', '200 IM', '400 IM'
+    ]
+
+    # 3. Preparar los datos para el editor
     df = st.session_state.marcas_df.copy()
-    if 'id' in df.columns:
-        df = df.drop(columns=['id'])
-        
+    
+    # Asegurarnos de que las columnas necesarias existan para evitar errores en el editor
+    for col in ['categoria', 'estilo', 'sexo', 'tiempo_objetivo', 'segundos']:
+        if col not in df.columns:
+            df[col] = None
+
+    # 4. El Editor de Datos (Data Editor)
     edited_df = st.data_editor(
         df, 
         use_container_width=True, 
         num_rows="dynamic",
         column_config={
-            "sexo": st.column_config.SelectboxColumn("Sexo", options=["Masculino", "Femenino", "Ambos"], required=True)
-        }
+            "categoria": st.column_config.SelectboxColumn("Categoría", options=cats_oficiales, required=True),
+            "estilo": st.column_config.SelectboxColumn("Estilo", options=estilos_oficiales, required=True),
+            "sexo": st.column_config.SelectboxColumn("Sexo", options=["Masculino", "Femenino", "Ambos"], required=True),
+            "tiempo_objetivo": st.column_config.TextColumn("Marca (MM:SS,MS)", placeholder="00:00,00", required=True),
+            "segundos": st.column_config.NumberColumn("Segundos (Auto)", disabled=True, format="%.2f")
+        },
+        hide_index=True
     )
     
+    # 5. Lógica de Guardado
     if st.button("Guardar Cambios permanentemente", type="primary"):
-        st.session_state.marcas_df = edited_df.copy()
-        supabase = init_connection()
-        if supabase:
-            try:
-                # Borra todo y reinserta para asimilar las variaciones dinamicas del data editor
+        # PASO CRÍTICO: Convertir el texto de tiempo a segundos antes de enviar a Supabase
+        try:
+            # Aplicamos la función de conversión a cada fila
+            edited_df['segundos'] = edited_df['tiempo_objetivo'].apply(convertir_tiempo_a_segundos)
+            
+            # Actualizamos el estado de la sesión
+            st.session_state.marcas_df = edited_df.copy()
+            
+            supabase = init_connection()
+            if supabase:
+                # Limpiar datos viejos y cargar los nuevos (Estrategia de reseteo)
+                # Nota: .neq("categoria", "ELIMINATODO") es un truco para borrar todo el contenido
                 supabase.table("marcas_minimas").delete().neq("categoria", "ELIMINATODO").execute()
+
+                # Dentro de la lógica de guardado:
                 recs = edited_df.to_dict('records')
+                # Asegúrate de que el diccionario tenga las llaves correctas para la BD
+                for r in recs:
+                    r['segundos_objetivo'] = r.pop('segundos') # Cambiamos el nombre para que coincida con SQL
                 if recs:
                     supabase.table("marcas_minimas").insert(recs).execute()
-                st.success("Guardado en Base de Datos de manera segura.")
-            except Exception as e:
-                st.error(f"Error Supabase guardando metas: {e}")
-        else:
-            st.success("Metas guardadas en el Prototipo Temporal.")
+                
+                st.success("✅ ¡Configuración guardada exitosamente en la base de datos!")
+                st.balloons()
+            else:
+                st.warning("⚠️ Modo local: Los cambios se guardaron solo para esta sesión.")
+                
+        except Exception as e:
+            st.error(f"❌ Error al procesar los datos: {e}")
+            st.info("Asegúrate de que todos los tiempos tengan el formato correcto (ej: 01:30,00)")
+
 
 def panel_master():
     """Panel exclusivo del administrador."""
