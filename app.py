@@ -552,7 +552,7 @@ def configurar_marcas():
             "categoria": st.column_config.SelectboxColumn("Categoría", options=cats_oficiales, required=True),
             "estilo": st.column_config.SelectboxColumn("Estilo", options=estilos_oficiales, required=True),
             "sexo": st.column_config.SelectboxColumn("Sexo", options=["Masculino", "Femenino", "Ambos"], required=True),
-            "tiempo_objetivo": st.column_config.TextColumn("Marca (MM:SS,MS)", placeholder="00:00,00", required=True),
+            "tiempo_objetivo": st.column_config.TextColumn("Marca (MM:SS,MS)", required=True),
             "segundos": st.column_config.NumberColumn("Segundos (Auto)", disabled=True, format="%.2f")
         },
         hide_index=True
