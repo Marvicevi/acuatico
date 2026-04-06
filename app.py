@@ -290,6 +290,22 @@ def mostrar_dashboard():
                     marcas_obj = {'Temporal': {'50m Libre': 28}}
                     cats_plot = ['Temporal']
                 
+                # ── Filtrar por grupo de categoría del nadador ──────────────────
+                # Solo mostrar las categorías del mismo grupo (Infantil / Juvenil / Mayores)
+                if 'Infantil' in cat_actual:
+                    cats_grupo = [c for c in cats_plot if 'Infantil' in c]
+                elif 'Juvenil' in cat_actual:
+                    cats_grupo = [c for c in cats_plot if 'Juvenil' in c]
+                elif 'Mayor' in cat_actual:
+                    cats_grupo = [c for c in cats_plot if 'Mayor' in c]
+                else:
+                    cats_grupo = cats_plot  # fallback: mostrar todo
+                # Aplicar filtro (solo si el filtro no dejó vacío el grupo)
+                if cats_grupo:
+                    cats_plot = cats_grupo
+                    marcas_obj = {k: v for k, v in marcas_obj.items() if k in cats_plot}
+                # ────────────────────────────────────────────────────────────────
+                
                 # Encontrar el mejor tiempo actual del nadador (en segundos)
                 _sec2 = 'segundos_totales' if 'segundos_totales' in tiempos_nadador.columns else 'segundos'
                 mejores_tiempos = tiempos_nadador.groupby('estilo')[_sec2].min().to_dict() if not tiempos_nadador.empty else {}
