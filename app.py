@@ -26,6 +26,17 @@ def convertir_tiempo_a_segundos(tiempo_str):
         return 0.0
 
 
+def formatear_tiempo_con_icono(row):
+    """Devuelve el tiempo formateado con un ícono según el tipo de piscina."""
+    tiempo = row.get('tiempo_formateado', row.get('tiempo', ''))
+    tipo = str(row.get('tipo_piscina', ''))
+    if 'Corta' in tipo:
+        return f"🏊 {tiempo}"
+    elif 'Larga' in tipo:
+        return f"🌊 {tiempo}"
+    return str(tiempo)
+
+
 # --- Configuración de la página ---
 st.set_page_config(
     page_title="Club de Natación Acuático Valdivia",
@@ -121,7 +132,7 @@ def cargar_datos():
             
             u_df = pd.DataFrame(usu) if usu else pd.DataFrame(columns=['id', 'nombre', 'email', 'rol', 'validado', 'grupos_asignados', 'clave'])
             n_df = pd.DataFrame(nad) if nad else pd.DataFrame(columns=['id', 'nombre', 'grupo', 'categoria', 'sexo'])
-            t_df = pd.DataFrame(tie) if tie else pd.DataFrame(columns=['id', 'id_nadador', 'fecha', 'lugar', 'estilo', 'tiempo', 'segundos'])
+            t_df = pd.DataFrame(tie) if tie else pd.DataFrame(columns=['id', 'id_nadador', 'fecha', 'lugar', 'estilo', 'tiempo_formateado', 'segundos_totales', 'tipo_piscina'])
             m_df = pd.DataFrame(mar) if mar else pd.DataFrame(columns=['categoria', 'estilo', 'sexo', 'segundos'])
             
             if not u_df.empty: u_df.rename(columns={'id': 'id_usuario'}, inplace=True)
@@ -142,10 +153,10 @@ def cargar_datos():
     ])
     
     tiempos_df = pd.DataFrame([
-        {'id_nadador': 1, 'fecha': '2023-10-15', 'lugar': 'Piscina Municipal', 'estilo': '50m Libre', 'tiempo': '00:28.50', 'segundos': 28.5},
-        {'id_nadador': 1, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '50m Libre', 'tiempo': '00:27.90', 'segundos': 27.9},
-        {'id_nadador': 2, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '100m Pecho', 'tiempo': '01:15.30', 'segundos': 75.3},
-        {'id_nadador': 4, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '200m Combinado', 'tiempo': '02:10.80', 'segundos': 130.8},
+        {'id_nadador': 1, 'fecha': '2023-10-15', 'lugar': 'Piscina Municipal', 'estilo': '50m Libre', 'tiempo_formateado': '00:28,50', 'segundos_totales': 28.5, 'tipo_piscina': 'Piscina Corta (25m)'},
+        {'id_nadador': 1, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '50m Libre', 'tiempo_formateado': '00:27,90', 'segundos_totales': 27.9, 'tipo_piscina': 'Piscina Larga (50m)'},
+        {'id_nadador': 2, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '100m Pecho', 'tiempo_formateado': '01:15,30', 'segundos_totales': 75.3, 'tipo_piscina': 'Piscina Corta (25m)'},
+        {'id_nadador': 4, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '200m Combinado', 'tiempo_formateado': '02:10,80', 'segundos_totales': 130.8, 'tipo_piscina': 'Piscina Larga (50m)'},
     ])
     
     usuarios_df = pd.DataFrame([
@@ -221,7 +232,9 @@ def mostrar_dashboard():
             with col1:
                 st.write(f"**Tiempos Registrados: {nadador_seleccionado} ({cat_actual})**")
                 if not tiempos_nadador.empty:
-                    st.dataframe(tiempos_nadador[['fecha', 'lugar', 'estilo', 'tiempo']], use_container_width=True)
+                    _disp = tiempos_nadador.copy()
+                    _disp['Tiempo'] = _disp.apply(formatear_tiempo_con_icono, axis=1)
+                    st.dataframe(_disp[['fecha', 'lugar', 'estilo', 'Tiempo']], use_container_width=True)
                 else:
                     st.warning("Este nadador aún no tiene tiempos registrados.")
             with col2:
@@ -294,7 +307,9 @@ def mostrar_dashboard():
         
         st.subheader("Mis Tiempos Registrados")
         if not tiempos_nadador.empty:
-            st.dataframe(tiempos_nadador[['fecha', 'lugar', 'estilo', 'tiempo']], use_container_width=True)
+            _disp = tiempos_nadador.copy()
+            _disp['Tiempo'] = _disp.apply(formatear_tiempo_con_icono, axis=1)
+            st.dataframe(_disp[['fecha', 'lugar', 'estilo', 'Tiempo']], use_container_width=True)
         else:
             st.warning("Aún no tienes tiempos registrados.")
         st.subheader("Mi Gráfica de Progreso")
@@ -377,6 +392,11 @@ def registrar_tiempos():
             with col2:
                 lugar = st.text_input("Lugar / Competencia")
                 tiempo_input = st.text_input("Tiempo (MM:SS,MS)", placeholder="01:05,50")
+            tipo_piscina = st.selectbox(
+                "Tipo de Piscina:",
+                ["Piscina Corta (25m)", "Piscina Larga (50m)"],
+                format_func=lambda x: f"🏊 {x}" if "Corta" in x else f"🌊 {x}"
+            )
             
             if st.form_submit_button("Guardar Tiempo"):
                 secs = convertir_tiempo_a_segundos(tiempo_input)
@@ -414,7 +434,8 @@ def registrar_tiempos():
                                 "lugar": lugar, 
                                 "estilo": estilo, 
                                 "tiempo_formateado": tiempo_input,
-                                "segundos_totales": secs
+                                "segundos_totales": secs,
+                                "tipo_piscina": tipo_piscina
                             }).execute()
                             st.success(f"Guardado: {tiempo_input} ({secs}s)")
                         except Exception as e:
@@ -431,11 +452,12 @@ def registrar_tiempos():
         # 1. CREAMOS LA LÍNEA DE EJEMPLO
         # Importante: Los nombres de columnas deben coincidir con tu SQL (tiempo_formateado)
         datos_ejemplo = {
-            'id_nadador': [1],  # El ID se encuentra en la pestaña 'Perfiles'
+            'id_nadador': [1],           # El ID se encuentra en la pestaña 'Perfiles'
             'fecha': ['2026-04-10'],
             'lugar': ['Piscina Valdivia'],
-            'estilo': ['200 IM'], # Debe ser exacto al ENUM de la BD
-            'tiempo_formateado': ['03:30,50'] # El formato MM:SS,MS que pediste
+            'estilo': ['200 IM'],         # Debe ser exacto al ENUM de la BD
+            'tipo_piscina': ['Piscina Corta (25m)'],  # o: Piscina Larga (50m)
+            'tiempo_formateado': ['03:30,50']  # Formato MM:SS,MS
         }
         
         plantilla_df = pd.DataFrame(datos_ejemplo)
