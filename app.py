@@ -382,20 +382,43 @@ def registrar_tiempos():
                 secs = convertir_tiempo_a_segundos(tiempo_input)
                 supabase = init_connection()
                 if supabase:
-                    id_nad = st.session_state.nadadores_df[st.session_state.nadadores_df['nombre'] == nadador_seleccionado].iloc[0]['id_nadador']
-                    try:
-                        # Dentro del if submitted del form de tiempos:
-                        supabase.table("tiempos").insert({
-                            "id_nadador": int(id_nad), 
-                            "fecha": fecha.strftime('%Y-%m-%d'),
-                            "lugar": lugar, 
-                            "estilo": estilo, 
-                            "tiempo_formateado": tiempo_input, # Nombre exacto de tu SQL
-                            "segundos_totales": secs        # Nombre exacto de tu SQL
-                        }).execute()
-                        st.success(f"Guardado: {tiempo_input} ({secs}s)")
-                    except Exception as e:
-                        st.error(f"Error BD: {e}")
+                    # Buscar el id del nadador de forma robusta
+                    nadador_row = st.session_state.nadadores_df[
+                        st.session_state.nadadores_df['nombre'] == nadador_seleccionado
+                    ]
+                    id_nad = None
+                    if not nadador_row.empty:
+                        fila = nadador_row.iloc[0]
+                        # Intentar con 'id_nadador' primero, luego 'id'
+                        for col_id in ['id_nadador', 'id']:
+                            if col_id in fila.index and pd.notna(fila[col_id]):
+                                id_nad = fila[col_id]
+                                break
+                    
+                    # Si no se encontró localmente, consultar Supabase directamente
+                    if id_nad is None:
+                        try:
+                            res = supabase.table("nadadores").select("id").eq("nombre", nadador_seleccionado).execute()
+                            if res.data:
+                                id_nad = res.data[0]['id']
+                        except Exception:
+                            pass
+                    
+                    if id_nad is None:
+                        st.error(f"No se pudo encontrar el ID de '{nadador_seleccionado}'. Recarga la página e intenta de nuevo.")
+                    else:
+                        try:
+                            supabase.table("tiempos").insert({
+                                "id_nadador": int(id_nad), 
+                                "fecha": fecha.strftime('%Y-%m-%d'),
+                                "lugar": lugar, 
+                                "estilo": estilo, 
+                                "tiempo_formateado": tiempo_input,
+                                "segundos_totales": secs
+                            }).execute()
+                            st.success(f"Guardado: {tiempo_input} ({secs}s)")
+                        except Exception as e:
+                            st.error(f"Error BD: {e}")
                 else:
                     st.success("Modo local: Tiempo guardado (simulado).")
 
