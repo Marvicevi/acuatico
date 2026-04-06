@@ -250,9 +250,10 @@ def mostrar_dashboard():
         
         if nadador_seleccionado:
             nadador_row = nadadores_del_grupo[nadadores_del_grupo['nombre'] == nadador_seleccionado].iloc[0]
-            id_nadador = nadador_row['id_nadador']
+            id_nadador = nadador_row.get('id_nadador', nadador_row.get('id', None))
             cat_actual = nadador_row['categoria']
-            tiempos_nadador = st.session_state.tiempos_df[st.session_state.tiempos_df['id_nadador'] == id_nadador]
+            _id_col_t = 'id_nadador' if 'id_nadador' in st.session_state.tiempos_df.columns else 'id'
+            tiempos_nadador = st.session_state.tiempos_df[st.session_state.tiempos_df[_id_col_t] == id_nadador] if id_nadador is not None else st.session_state.tiempos_df.iloc[0:0]
             
             col1, col2 = st.columns([1.2, 1])
             with col1:
