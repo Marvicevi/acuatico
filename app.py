@@ -37,6 +37,17 @@ def formatear_tiempo_con_icono(row):
     return str(tiempo)
 
 
+def segundos_a_tiempo(secs):
+    """Convierte segundos (float) al formato MM:SS,MS para mostrar al usuario."""
+    try:
+        secs = float(secs)
+        minutos = int(secs // 60)
+        resto = secs - minutos * 60
+        return f"{minutos:02d}:{resto:05.2f}".replace('.', ',')
+    except:
+        return str(secs)
+
+
 # --- Configuración de la página ---
 st.set_page_config(
     page_title="Club de Natación Acuático Valdivia",
@@ -291,9 +302,12 @@ def mostrar_dashboard():
                     cats_plot = ['Temporal']
                 
                 # ── Filtrar por grupo de categoría del nadador ──────────────────
-                # Solo mostrar las categorías del mismo grupo (Infantil / Juvenil / Mayores)
+                # Guardar mapa completo ANTES de filtrar (para análisis de progresión)
+                marcas_obj_completo = dict(marcas_obj)
+                # Infantil ve sus categorías + Juvenil A1 como meta aspiracional
+                # Juvenil y Mayores ven solo su grupo
                 if 'Infantil' in cat_actual:
-                    cats_grupo = [c for c in cats_plot if 'Infantil' in c]
+                    cats_grupo = [c for c in cats_plot if 'Infantil' in c or c == 'Juvenil A1']
                 elif 'Juvenil' in cat_actual:
                     cats_grupo = [c for c in cats_plot if 'Juvenil' in c]
                 elif 'Mayor' in cat_actual:
@@ -346,6 +360,56 @@ def mostrar_dashboard():
                     margin=dict(l=90, r=90, t=40, b=80)
                 )
                 st.plotly_chart(fig, use_container_width=True)
+
+            # ── Bloque de progresión hacia siguiente categoría ───────────────
+            SIGUIENTE_CAT = {
+                'Infantil A': 'Infantil B1', 'Infantil B1': 'Infantil B2',
+                'Infantil B2': 'Juvenil A1', 'Juvenil A1': 'Juvenil A2',
+                'Juvenil A2': 'Juvenil B',   'Juvenil B': 'Mayores',
+                'Mayores': None
+            }
+            next_cat = SIGUIENTE_CAT.get(cat_actual)
+            _sec2b = 'segundos_totales' if 'segundos_totales' in tiempos_nadador.columns else 'segundos'
+            mejores_seg = tiempos_nadador.groupby('estilo')[_sec2b].min().to_dict() if not tiempos_nadador.empty else {}
+
+            if next_cat and next_cat in marcas_obj_completo and mejores_seg:
+                next_marks = marcas_obj_completo[next_cat]
+                estilos_comunes = [e for e in next_marks if e in mejores_seg]
+                if estilos_comunes:
+                    st.markdown(f"### 🎯 ¿Cuánto falta para **{next_cat}**?")
+                    todos_ok = all(mejores_seg[e] <= next_marks[e] for e in estilos_comunes)
+                    if todos_ok:
+                        diferencias = [next_marks[e] - mejores_seg[e] for e in estilos_comunes]
+                        prom = sum(diferencias) / len(diferencias)
+                        st.success(
+                            f"🎉 **¡Felicitaciones, {nadador_seleccionado}!** "
+                            f"Ya superas **todas** las marcas mínimas de {next_cat}. "
+                            f"Estás en promedio **{segundos_a_tiempo(prom)} por encima** de cada marca objetivo."
+                        )
+                    else:
+                        cols_prog = st.columns(len(estilos_comunes))
+                        for i, estilo in enumerate(estilos_comunes):
+                            tiempo_nad = mejores_seg[estilo]
+                            objetivo  = next_marks[estilo]
+                            diferencia = tiempo_nad - objetivo
+                            with cols_prog[i]:
+                                if diferencia <= 0:  # ya clasificó en este estilo
+                                    st.success(
+                                        f"**{estilo}**\n\n"
+                                        f"✅ Clasificado\n\n"
+                                        f"Tu marca: `{segundos_a_tiempo(tiempo_nad)}`\n\n"
+                                        f"Superaste por `{segundos_a_tiempo(abs(diferencia))}`"
+                                    )
+                                else:
+                                    st.warning(
+                                        f"**{estilo}**\n\n"
+                                        f"⏱️ Faltan `{segundos_a_tiempo(diferencia)}`\n\n"
+                                        f"Tu marca: `{segundos_a_tiempo(tiempo_nad)}`\n\n"
+                                        f"Objetivo: `{segundos_a_tiempo(objetivo)}`"
+                                    )
+            elif not next_cat:
+                st.info(f"🏆 **{nadador_seleccionado}** ya está en la categoría máxima (**Mayores**).")
+            # ───────────────────────────────────────────────────────────────────
 
     elif st.session_state.user_role == 'Nadador':
         st.header("Mi Progreso Personal")
