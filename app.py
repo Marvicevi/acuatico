@@ -137,10 +137,13 @@ def cargar_datos():
             
             if not u_df.empty: u_df.rename(columns={'id': 'id_usuario'}, inplace=True)
 
-            # Normalizar columnas de nadadores
+            # Normalizar columnas de nadadores:
+            # SIEMPRE usar el id auto-generado de Supabase como llave FK confiable
             if not n_df.empty:
-                if 'id' in n_df.columns and 'id_nadador' not in n_df.columns:
-                    n_df.rename(columns={'id': 'id_nadador'}, inplace=True)
+                if 'id' in n_df.columns:
+                    if 'id_nadador' in n_df.columns:
+                        n_df = n_df.drop(columns=['id_nadador'])  # Descartar columna usuario (puede tener NULLs)
+                    n_df = n_df.rename(columns={'id': 'id_nadador'})
                 elif 'id_nadador' not in n_df.columns:
                     n_df.insert(0, 'id_nadador', range(1, len(n_df) + 1))
 
@@ -233,7 +236,7 @@ def mostrar_dashboard():
         for _, nad in nadadores_del_grupo.iterrows():
             _id_col = 'id_nadador' if 'id_nadador' in st.session_state.tiempos_df.columns else 'id'
             _id_nad = nad.get('id_nadador', nad.get('id', None))
-            tiempos_nad = st.session_state.tiempos_df[st.session_state.tiempos_df[_id_col] == _id_nad] if _id_nad is not None else st.session_state.tiempos_df.iloc[0:0]
+            tiempos_nad = st.session_state.tiempos_df[st.session_state.tiempos_df[_id_col] == _id_nad] if pd.notna(_id_nad) else st.session_state.tiempos_df.iloc[0:0]
             _sec = 'segundos_totales' if 'segundos_totales' in tiempos_nad.columns else 'segundos'
             mejores = tiempos_nad.groupby('estilo')[_sec].min().to_dict() if not tiempos_nad.empty else {}
             resumen_data.append({
@@ -253,7 +256,7 @@ def mostrar_dashboard():
             id_nadador = nadador_row.get('id_nadador', nadador_row.get('id', None))
             cat_actual = nadador_row['categoria']
             _id_col_t = 'id_nadador' if 'id_nadador' in st.session_state.tiempos_df.columns else 'id'
-            tiempos_nadador = st.session_state.tiempos_df[st.session_state.tiempos_df[_id_col_t] == id_nadador] if id_nadador is not None else st.session_state.tiempos_df.iloc[0:0]
+            tiempos_nadador = st.session_state.tiempos_df[st.session_state.tiempos_df[_id_col_t] == id_nadador] if pd.notna(id_nadador) else st.session_state.tiempos_df.iloc[0:0]
             
             col1, col2 = st.columns([1.2, 1])
             with col1:
@@ -574,11 +577,27 @@ def gestionar_nadadores():
         supabase = init_connection()
         if supabase:
             try:
-                supabase.table("nadadores").delete().neq("nombre", "ELIMINATODO").execute()
-                recs = edited_df.to_dict('records')
-                if recs:
-                    supabase.table("nadadores").insert(recs).execute()
-                st.success("Guardado seguro en Supabase.")
+                for _, row in edited_df.iterrows():
+                    r = row.to_dict()
+                    id_val = r.pop('id_nadador', None)
+                    # Limpiar valores NaN antes de enviar a Supabase
+                    r_clean = {k: v for k, v in r.items() if pd.notna(v)}
+                    if pd.notna(id_val):  # Nadador existente → actualizar
+                        supabase.table("nadadores").update(r_clean).eq("id", int(id_val)).execute()
+                    else:  # Nadador nuevo → insertar
+                        supabase.table("nadadores").insert(r_clean).execute()
+
+                # Recargar IDs frescos de Supabase para mantener sesión sincronizada
+                nad_fresh = supabase.table("nadadores").select("*").execute().data
+                if nad_fresh:
+                    fresh_df = pd.DataFrame(nad_fresh)
+                    if 'id' in fresh_df.columns:
+                        if 'id_nadador' in fresh_df.columns:
+                            fresh_df = fresh_df.drop(columns=['id_nadador'])
+                        fresh_df = fresh_df.rename(columns={'id': 'id_nadador'})
+                    st.session_state.nadadores_df = fresh_df
+
+                st.success("✅ Guardado seguro en Supabase.")
             except Exception as e:
                 st.error(f"Error Supabase guardando perfiles: {e}")
         else:
