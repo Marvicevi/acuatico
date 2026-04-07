@@ -651,34 +651,38 @@ def registrar_tiempos():
                             st.error(f"Error BD: {e}")
                 else:
                     st.success("Modo local: Tiempo guardado (simulado).")
-
     with tab2:
         st.markdown("### 📥 Descargar Plantilla y Cargar Datos")
-        st.write("Sigue estos pasos: 1. Baja el modelo, 2. Completa los datos (puedes borrar el ejemplo), 3. Sube el archivo.")
-        
+        st.info(
+            "💡 **Pasos:**  \n"
+            "1. Descarga la plantilla — ya tiene los nombres e IDs reales de los nadadores.  \n"
+            "2. Completa las columnas en blanco: **fecha, lugar, estilo, tipo\_piscina, tiempo\_formateado**.  \n"
+            "3. Puedes agregar más filas para el mismo nadador si tiene varios tiempos.  \n"
+            "4. **No modifiques** las columnas `id_nadador` ni `nombre`."
+        )
+
         import io
-        
-        # 1. CREAMOS LA LÍNEA DE EJEMPLO
-        # Importante: Los nombres de columnas deben coincidir con tu SQL (tiempo_formateado)
-        datos_ejemplo = {
-            'id_nadador': [1],           # El ID se encuentra en la pestaña 'Perfiles'
-            'fecha': ['2026-04-10'],
-            'lugar': ['Piscina Valdivia'],
-            'estilo': ['200 IM'],         # Debe ser exacto al ENUM de la BD
-            'tipo_piscina': ['Piscina Corta (25m)'],  # o: Piscina Larga (50m)
-            'tiempo_formateado': ['03:30,50']  # Formato MM:SS,MS
-        }
-        
-        plantilla_df = pd.DataFrame(datos_ejemplo)
-        
-        # Preparamos el buffer para la descarga
+
+        # Generar plantilla con nadadores reales de Supabase
+        _nad_df = st.session_state.nadadores_df.copy()
+        _id_col_pl = 'id_nadador' if 'id_nadador' in _nad_df.columns else 'id'
+        plantilla_df = pd.DataFrame({
+            'id_nadador':       _nad_df[_id_col_pl].values,
+            'nombre':           _nad_df['nombre'].values,     # referencia para el entrenador
+            'fecha':            '',
+            'lugar':            '',
+            'estilo':           '',
+            'tipo_piscina':     '',
+            'tiempo_formateado': ''
+        })
+
         csv_buffer = io.StringIO()
         plantilla_df.to_csv(csv_buffer, index=False)
-        
+
         st.download_button(
-            label="📥 Descargar Modelo CSV con Ejemplo", 
-            data=csv_buffer.getvalue().encode('utf-8'), 
-            file_name="modelo_carga_tiempos.csv", 
+            label="📥 Descargar Plantilla con Nadadores Actuales",
+            data=csv_buffer.getvalue().encode('utf-8'),
+            file_name="plantilla_carga_tiempos.csv",
             mime="text/csv"
         )
         
@@ -699,25 +703,29 @@ def registrar_tiempos():
                 st.dataframe(df_cargado, use_container_width=True)
                 
                 if st.button("🚀 Confirmar e Insertar en Base de Datos", type="primary"):
-                    # MAGIA: Convertimos la columna MM:SS,MS a segundos numéricos
-                    # Usamos la función convertir_tiempo_a_segundos que definimos al inicio
                     df_cargado['segundos_totales'] = df_cargado['tiempo_formateado'].apply(convertir_tiempo_a_segundos)
-                    
-                    supabase = init_connection()
-                    if supabase:
-                        try:
-                            # Convertimos a lista de diccionarios para Supabase
-                            recs = df_cargado.to_dict('records')
-                            
-                            # Insertamos masivamente
-                            resultado = supabase.table("tiempos").insert(recs).execute()
-                            
-                            st.success(f"✅ ¡Éxito! Se han registrado {len(recs)} tiempos correctamente.")
-                            st.balloons()
-                        except Exception as e:
-                            st.error(f"❌ Error de Base de Datos: {e}")
+
+                    # Descartar filas sin tiempo (el entrenador dejó la fila en blanco)
+                    df_insertar = df_cargado[df_cargado['tiempo_formateado'].notna() & (df_cargado['tiempo_formateado'].astype(str).str.strip() != '')].copy()
+
+                    # Excluir columna 'nombre' (es solo referencia, no existe en tabla tiempos)
+                    cols_tiempos = ['id_nadador', 'fecha', 'lugar', 'estilo', 'tipo_piscina', 'tiempo_formateado', 'segundos_totales']
+                    df_insertar = df_insertar[[c for c in cols_tiempos if c in df_insertar.columns]]
+
+                    if df_insertar.empty:
+                        st.warning("⚠️ No hay filas con tiempos para insertar. Asegúrate de completar la columna `tiempo_formateado`.")
                     else:
-                        st.info("💡 Modo Prototipo: Los datos se procesaron pero no hay conexión a Supabase.")
+                        supabase = init_connection()
+                        if supabase:
+                            try:
+                                recs = df_insertar.to_dict('records')
+                                supabase.table("tiempos").insert(recs).execute()
+                                st.success(f"✅ ¡Éxito! Se han registrado {len(recs)} tiempos correctamente.")
+                                st.balloons()
+                            except Exception as e:
+                                st.error(f"❌ Error de Base de Datos: {e}")
+                        else:
+                            st.info("💡 Modo Prototipo: Los datos se procesaron pero no hay conexión a Supabase.")
             
             except Exception as e:
                 st.error(f"❌ Error al procesar el archivo: {e}")
