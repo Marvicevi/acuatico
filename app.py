@@ -366,6 +366,13 @@ def mostrar_dashboard():
                 st.markdown("---")
                 st.markdown("### 📈 Evolución Temporal por Prueba")
                 st.caption("Cada gráfica muestra cómo han evolucionado los tiempos. Las líneas son marcas mínimas de categoría.")
+                st.markdown(
+                    '<span style="color:#1f77b4">&#9679; <b>Piscina Corta (25m)</b></span>'
+                    '&nbsp;&nbsp;&nbsp;'
+                    '<span style="color:#e07b00">&#9670; <b>Piscina Larga (50m)</b></span>',
+                    unsafe_allow_html=True
+                )
+                st.markdown("")
                 _sec_col_ev = 'segundos_totales' if 'segundos_totales' in tiempos_nadador.columns else 'segundos'
                 _tf_col     = 'tiempo_formateado' if 'tiempo_formateado' in tiempos_nadador.columns else _sec_col_ev
                 estilos_nad = sorted(tiempos_nadador['estilo'].unique())
@@ -412,7 +419,7 @@ def mostrar_dashboard():
                                     customdata=_sub[_tf_col].values,
                                     hovertemplate='<b>%{customdata}</b><br>%{x|%d/%m/%Y}<extra>'
                                                   + _ps['label'] + '</extra>',
-                                    showlegend=True
+                                    showlegend=False
                                 ))
 
                             # Líneas horizontales de marcas mínimas por categoría
@@ -434,11 +441,9 @@ def mostrar_dashboard():
                                 title=dict(text=f"<b>{_estilo}</b>", font=dict(size=14)),
                                 xaxis=dict(title="Fecha", tickformat="%b %Y"),
                                 yaxis=dict(title="Segundos", autorange=True),
-                                showlegend=True,
-                                legend=dict(orientation="h", yanchor="top", y=-0.15,
-                                            xanchor="center", x=0.5, font=dict(size=11)),
-                                margin=dict(l=55, r=130, t=45, b=60),
-                                height=340,
+                                showlegend=False,
+                                margin=dict(l=55, r=130, t=45, b=40),
+                                height=320,
                                 plot_bgcolor='rgba(0,0,0,0)',
                                 paper_bgcolor='rgba(0,0,0,0)'
                             )
