@@ -361,6 +361,67 @@ def mostrar_dashboard():
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
+            # ── Evolución Temporal por Prueba ───────────────────────────────────
+            if not tiempos_nadador.empty:
+                st.markdown("---")
+                st.markdown("### 📈 Evolución Temporal por Prueba")
+                st.caption("Cada gráfica muestra cómo han evolucionado los tiempos. Las líneas son marcas mínimas de categoría.")
+                _sec_col_ev = 'segundos_totales' if 'segundos_totales' in tiempos_nadador.columns else 'segundos'
+                _tf_col     = 'tiempo_formateado' if 'tiempo_formateado' in tiempos_nadador.columns else _sec_col_ev
+                estilos_nad = sorted(tiempos_nadador['estilo'].unique())
+                colores_cat = ['#636efa', '#ef553b', '#00cc96', '#ab63fa', '#ffa15a', '#19d3f3', '#ff6692']
+
+                for _i in range(0, len(estilos_nad), 2):
+                    _batch = estilos_nad[_i:_i+2]
+                    _cols_ev = st.columns(len(_batch))
+                    for _j, _estilo in enumerate(_batch):
+                        _df_est = tiempos_nadador[tiempos_nadador['estilo'] == _estilo].copy()
+                        _df_est['fecha'] = pd.to_datetime(_df_est['fecha'])
+                        _df_est = _df_est.sort_values('fecha')
+
+                        with _cols_ev[_j]:
+                            _fig_ev = go.Figure()
+
+                            # Traza de tiempos del nadador
+                            _fig_ev.add_trace(go.Scatter(
+                                x=_df_est['fecha'],
+                                y=_df_est[_sec_col_ev],
+                                mode='lines+markers',
+                                name=nadador_seleccionado,
+                                line=dict(color='#1f77b4', width=3),
+                                marker=dict(size=9),
+                                customdata=_df_est[_tf_col].values,
+                                hovertemplate='<b>%{customdata}</b><br>%{x|%d/%m/%Y}<extra></extra>'
+                            ))
+
+                            # Líneas horizontales de marcas mínimas por categoría
+                            _ci = 0
+                            for _cat_m, _marcas_m in marcas_obj.items():
+                                if _estilo in _marcas_m:
+                                    _fig_ev.add_hline(
+                                        y=_marcas_m[_estilo],
+                                        line_dash='solid' if _cat_m == cat_actual else 'dash',
+                                        line_color=colores_cat[_ci % len(colores_cat)],
+                                        line_width=2.5 if _cat_m == cat_actual else 1.5,
+                                        annotation_text=_cat_m,
+                                        annotation_position="right",
+                                        annotation_font=dict(size=10)
+                                    )
+                                _ci += 1
+
+                            _fig_ev.update_layout(
+                                title=dict(text=f"<b>{_estilo}</b>", font=dict(size=14)),
+                                xaxis=dict(title="Fecha", tickformat="%b %Y"),
+                                yaxis=dict(title="Segundos", autorange=True),
+                                showlegend=False,
+                                margin=dict(l=55, r=130, t=45, b=40),
+                                height=320,
+                                plot_bgcolor='rgba(0,0,0,0)',
+                                paper_bgcolor='rgba(0,0,0,0)'
+                            )
+                            st.plotly_chart(_fig_ev, use_container_width=True)
+            # ──────────────────────────────────────────────────────────────────────
+
             # ── Bloque de progresión hacia siguiente categoría ───────────────
             SIGUIENTE_CAT = {
                 'Infantil A': 'Infantil B1', 'Infantil B1': 'Infantil B2',
@@ -862,8 +923,10 @@ if not st.session_state.logged_in:
 else:
     # --- Menú de Navegación Condicional ---
     opciones_menu = ["📊 Dashboard"]
+    if st.session_state.user_role in ['Directiva', 'Master']:
+        opciones_menu.append("🗓️ Asistencia")
     if st.session_state.user_role in ['Entrenador', 'Master']:
-        opciones_menu.extend(["🗓️ Asistencia", "👥 Perfiles"])
+        opciones_menu.append("👥 Perfiles")
     if st.session_state.user_role in ['Entrenador', 'Master', 'Directiva']:
         opciones_menu.extend(["⏱️ Registrar Tiempos", "⚙️ Configurar Marcas"])
         
