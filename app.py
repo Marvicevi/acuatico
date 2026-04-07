@@ -382,17 +382,38 @@ def mostrar_dashboard():
                         with _cols_ev[_j]:
                             _fig_ev = go.Figure()
 
-                            # Traza de tiempos del nadador
+                            # Línea de conexión suave entre todos los puntos (orden cronológico)
                             _fig_ev.add_trace(go.Scatter(
-                                x=_df_est['fecha'],
-                                y=_df_est[_sec_col_ev],
-                                mode='lines+markers',
-                                name=nadador_seleccionado,
-                                line=dict(color='#1f77b4', width=3),
-                                marker=dict(size=9),
-                                customdata=_df_est[_tf_col].values,
-                                hovertemplate='<b>%{customdata}</b><br>%{x|%d/%m/%Y}<extra></extra>'
+                                x=_df_est['fecha'], y=_df_est[_sec_col_ev],
+                                mode='lines', showlegend=False,
+                                line=dict(color='#aaaaaa', width=2),
+                                hoverinfo='skip'
                             ))
+
+                            # Marcadores diferenciados por tipo de piscina
+                            _POOL_STYLES = {
+                                'Piscina Corta (25m)': dict(color='#1f77b4', symbol='circle',  label='🏊 Corta (25m)'),
+                                'Piscina Larga (50m)': dict(color='#e07b00', symbol='diamond', label='🌊 Larga (50m)'),
+                            }
+                            _has_tipo = 'tipo_piscina' in _df_est.columns
+                            for _tipo_pool, _ps in _POOL_STYLES.items():
+                                if _has_tipo:
+                                    _sub = _df_est[_df_est['tipo_piscina'] == _tipo_pool]
+                                else:
+                                    _sub = _df_est if _tipo_pool == 'Piscina Corta (25m)' else _df_est.iloc[0:0]
+                                if _sub.empty:
+                                    continue
+                                _fig_ev.add_trace(go.Scatter(
+                                    x=_sub['fecha'], y=_sub[_sec_col_ev],
+                                    mode='markers',
+                                    name=_ps['label'],
+                                    marker=dict(color=_ps['color'], symbol=_ps['symbol'],
+                                                size=12, line=dict(width=1.5, color='white')),
+                                    customdata=_sub[_tf_col].values,
+                                    hovertemplate='<b>%{customdata}</b><br>%{x|%d/%m/%Y}<extra>'
+                                                  + _ps['label'] + '</extra>',
+                                    showlegend=True
+                                ))
 
                             # Líneas horizontales de marcas mínimas por categoría
                             _ci = 0
@@ -413,9 +434,11 @@ def mostrar_dashboard():
                                 title=dict(text=f"<b>{_estilo}</b>", font=dict(size=14)),
                                 xaxis=dict(title="Fecha", tickformat="%b %Y"),
                                 yaxis=dict(title="Segundos", autorange=True),
-                                showlegend=False,
-                                margin=dict(l=55, r=130, t=45, b=40),
-                                height=320,
+                                showlegend=True,
+                                legend=dict(orientation="h", yanchor="top", y=-0.15,
+                                            xanchor="center", x=0.5, font=dict(size=11)),
+                                margin=dict(l=55, r=130, t=45, b=60),
+                                height=340,
                                 plot_bgcolor='rgba(0,0,0,0)',
                                 paper_bgcolor='rgba(0,0,0,0)'
                             )
@@ -491,17 +514,23 @@ def mostrar_dashboard():
         st.error("Rol no reconocido o cuenta pendiente.")
 
 def mostrar_asistencia():
-    """Muestra el contenido de la página de Asistencia."""
+    """Muestra la página de Asistencia. Entrenador edita; Directiva/Master solo ven."""
     st.header("Registro de Asistencia 🗓️")
-    if st.session_state.user_role != 'Entrenador':
-        st.warning("Esta sección es solo para entrenadores.")
+
+    rol = st.session_state.user_role
+    if rol not in ['Entrenador', 'Directiva', 'Master']:
+        st.warning("Esta sección no está disponible para tu perfil.")
         return
 
+    solo_lectura = rol in ['Directiva', 'Master']
+    if solo_lectura:
+        st.info("👁️ **Modo vista** — solo los entrenadores pueden registrar la asistencia.")
+
     user_info = st.session_state.user_info
-    grupos_asignados = user_info['grupos_asignados']
-    if 'Todos' in grupos_asignados or not grupos_asignados:
+    grupos_asignados = user_info.get('grupos_asignados', [])
+    if solo_lectura or 'Todos' in grupos_asignados or not grupos_asignados:
         grupos_asignados = st.session_state.nadadores_df['grupo'].unique().tolist()
-    
+
     col1, col2 = st.columns(2)
     with col1:
         grupo_seleccionado = st.selectbox("Grupo:", grupos_asignados)
@@ -510,34 +539,36 @@ def mostrar_asistencia():
 
     nadadores_del_grupo = st.session_state.nadadores_df[st.session_state.nadadores_df['grupo'] == grupo_seleccionado]
     st.subheader(f"Lista de nadadores para el grupo: {grupo_seleccionado}")
-    
-    # Preparar DataFrame para Data Editor de asistencia
+
     asistencia_df = nadadores_del_grupo[['id_nadador', 'nombre']].copy()
-    asistencia_df['estado'] = 'Ausente' # Por defecto
-    
+    asistencia_df['estado'] = 'Ausente'
+
     edited_df = st.data_editor(
         asistencia_df,
         column_config={
-            "id_nadador": None, # Ocultamos el campo en el UI
+            "id_nadador": None,
             "nombre": st.column_config.TextColumn("Nadador", disabled=True),
             "estado": st.column_config.SelectboxColumn("Asistencia", options=["Presente", "Ausente"], required=True)
         },
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        disabled=solo_lectura  # Directiva/Master solo ven, no editan
     )
-        
-    if st.button("Guardar Asistencia", type="primary"):
-        presentes = edited_df[edited_df['estado'] == 'Presente']
-        supabase = init_connection()
-        if supabase:
-            fecha_str = fecha_seleccionada.strftime('%Y-%m-%d')
-            data_to_insert = [{"id_nadador": int(row['id_nadador']), "fecha": fecha_str, "estado": "Presente"} for _, row in presentes.iterrows()]
-            if data_to_insert:
-                try:
-                    supabase.table("asistencias").upsert(data_to_insert).execute()
-                except Exception as e:
-                    st.error(f"Error BD al guardar asistencias: {e}")
-        st.success(f"Asistencia guardada para el {fecha_seleccionada.strftime('%d-%m-%Y')}. {len(presentes)} nadador(es) presente(s).")
+
+    if not solo_lectura:
+        if st.button("Guardar Asistencia", type="primary"):
+            presentes = edited_df[edited_df['estado'] == 'Presente']
+            supabase = init_connection()
+            if supabase:
+                fecha_str = fecha_seleccionada.strftime('%Y-%m-%d')
+                data_to_insert = [{"id_nadador": int(row['id_nadador']), "fecha": fecha_str, "estado": "Presente"} for _, row in presentes.iterrows()]
+                if data_to_insert:
+                    try:
+                        supabase.table("asistencias").upsert(data_to_insert).execute()
+                    except Exception as e:
+                        st.error(f"Error BD al guardar asistencias: {e}")
+            st.success(f"Asistencia guardada para el {fecha_seleccionada.strftime('%d-%m-%Y')}. {len(presentes)} nadador(es) presente(s).")
+
 
 def registrar_tiempos():
     st.header("Registrar Nuevos Tiempos ⏱️")
