@@ -63,3 +63,27 @@ Perfil de lectura personal.
 5. Guarda (Save) y Ejecuta (Deploy).
 
 *Listo! El sistema está vivo, enlazado, configurado y asegurado para todos tus dispositivos.*
+
+---
+
+## 📱 Uso en Dispositivos Móviles (App)
+
+La aplicación está diseñada para ser completamente responsiva, por lo que **funciona perfectamente tanto en Android como en iPhone (iOS)**. No necesitas publicarla en la App Store ni en Google Play Store.
+
+Para que los usuarios la tengan en su celular como si fuera una aplicación nativa (con su ícono propio y sin barra de direcciones web), deben seguir estos simples pasos:
+
+### Para usuarios de iPhone (iOS):
+1. Abre el navegador **Safari**.
+2. Ingresa al enlace (URL) de la aplicación.
+3. Toca el ícono de **Compartir** (el cuadrado con una flecha apuntando hacia arriba, en la parte inferior de la pantalla).
+4. Desplázate hacia abajo y selecciona **"Agregar a inicio"** (Add to Home Screen).
+5. Toca en **"Agregar"** en la esquina superior derecha.
+6. ¡Listo! Verás el ícono de la app en la pantalla de inicio de tu iPhone.
+
+### Para usuarios de Android:
+1. Abre el navegador **Google Chrome**.
+2. Ingresa al enlace (URL) de la aplicación.
+3. Toca el ícono de **Menú** (los tres puntos verticales en la esquina superior derecha).
+4. Selecciona **"Agregar a la pantalla principal"** (Add to Home screen) o "Instalar aplicación".
+5. Toca en **"Agregar"** o "Instalar" para confirmar.
+6. ¡Listo! La aplicación aparecerá junto al resto de las apps en tu teléfono.
