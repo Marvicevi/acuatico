@@ -134,31 +134,53 @@ def init_connection():
 def cargar_datos():
     """Carga datos desde Supabase o usa simulados si no hay conexión."""
     supabase = init_connection()
+
+    # Columnas por defecto de las nuevas tablas
+    _cols_inc   = ['id','fecha','grupo','tipo','id_nadador','descripcion']
+    _cols_tst   = ['id','nombre','fecha','grupo','descripcion']
+    _cols_res   = ['id','id_test','id_nadador','resultado','observaciones']
+    _cols_dfis  = ['id','id_nadador','fecha','estatura_cm','peso_kg','envergadura_cm','talla_sentado_cm','porc_grasa','observaciones']
+    _cols_tent  = ['id','id_nadador','fecha','prueba','tiempo_formateado','segundos_totales','serie','tipo_piscina','observaciones']
+
+    def _safe(tbl, cols):
+        """Carga una tabla tolerando que no exista aún."""
+        try:
+            data = supabase.table(tbl).select("*").execute().data
+            return pd.DataFrame(data) if data else pd.DataFrame(columns=cols)
+        except Exception:
+            return pd.DataFrame(columns=cols)
+
     if supabase:
         try:
             usu = supabase.table("usuarios").select("*").execute().data
             nad = supabase.table("nadadores").select("*").execute().data
             tie = supabase.table("tiempos").select("*").execute().data
             mar = supabase.table("marcas_minimas").select("*").execute().data
-            
+
             u_df = pd.DataFrame(usu) if usu else pd.DataFrame(columns=['id', 'nombre', 'email', 'rol', 'validado', 'grupos_asignados', 'clave'])
             n_df = pd.DataFrame(nad) if nad else pd.DataFrame(columns=['id', 'nombre', 'grupo', 'categoria', 'sexo'])
             t_df = pd.DataFrame(tie) if tie else pd.DataFrame(columns=['id', 'id_nadador', 'fecha', 'lugar', 'estilo', 'tiempo_formateado', 'segundos_totales', 'tipo_piscina'])
             m_df = pd.DataFrame(mar) if mar else pd.DataFrame(columns=['categoria', 'estilo', 'sexo', 'segundos'])
-            
+
+            # Nuevas tablas (tolerantes a que no existan aún)
+            inc_df   = _safe("incidencias_clase", _cols_inc)
+            tst_df   = _safe("tests", _cols_tst)
+            res_df   = _safe("resultados_test", _cols_res)
+            dfis_df  = _safe("datos_fisicos", _cols_dfis)
+            tent_df  = _safe("tiempos_entrenamiento", _cols_tent)
+
             if not u_df.empty: u_df.rename(columns={'id': 'id_usuario'}, inplace=True)
 
-            # Normalizar columnas de nadadores:
-            # SIEMPRE usar el id auto-generado de Supabase como llave FK confiable
+            # Normalizar columnas de nadadores
             if not n_df.empty:
                 if 'id' in n_df.columns:
                     if 'id_nadador' in n_df.columns:
-                        n_df = n_df.drop(columns=['id_nadador'])  # Descartar columna usuario (puede tener NULLs)
+                        n_df = n_df.drop(columns=['id_nadador'])
                     n_df = n_df.rename(columns={'id': 'id_nadador'})
                 elif 'id_nadador' not in n_df.columns:
                     n_df.insert(0, 'id_nadador', range(1, len(n_df) + 1))
 
-            # Normalizar columnas de tiempos (compatibilidad con esquemas viejos y nuevos)
+            # Normalizar columnas de tiempos
             if not t_df.empty:
                 _rn = {}
                 if 'nadador_id' in t_df.columns and 'id_nadador' not in t_df.columns:
@@ -170,17 +192,16 @@ def cargar_datos():
                 if _rn:
                     t_df.rename(columns=_rn, inplace=True)
 
-            # Normalizar columnas de marcas_minimas
+            # Normalizar marcas_minimas
             if not m_df.empty:
                 if 'segundos_objetivo' in m_df.columns and 'segundos' not in m_df.columns:
                     m_df.rename(columns={'segundos_objetivo': 'segundos'}, inplace=True)
 
-            # Si hay usuarios en Base de Datos anulamos el fallback
             if not u_df.empty:
-                return n_df, t_df, u_df, m_df
+                return n_df, t_df, u_df, m_df, inc_df, tst_df, res_df, dfis_df, tent_df
         except Exception as e:
             st.sidebar.warning(f"Error conectando a BD: {e}. Usando modo local.")
-            
+
     # --- FALLBACK DE PROTOTIPO ---
     nadadores_df = pd.DataFrame([
         {'id_nadador': 1, 'nombre': 'Ana', 'grupo': 'Competitivo', 'categoria': 'Infantil B1', 'sexo': 'Femenino'},
@@ -188,14 +209,12 @@ def cargar_datos():
         {'id_nadador': 3, 'nombre': 'Carla', 'grupo': 'Precompetitivo', 'categoria': 'Juvenil A1', 'sexo': 'Femenino'},
         {'id_nadador': 4, 'nombre': 'Pedro', 'grupo': 'Elite', 'categoria': 'Mayores', 'sexo': 'Masculino'},
     ])
-    
     tiempos_df = pd.DataFrame([
         {'id_nadador': 1, 'fecha': '2023-10-15', 'lugar': 'Piscina Municipal', 'estilo': '50m Libre', 'tiempo_formateado': '00:28,50', 'segundos_totales': 28.5, 'tipo_piscina': 'Piscina Corta (25m)'},
         {'id_nadador': 1, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '50m Libre', 'tiempo_formateado': '00:27,90', 'segundos_totales': 27.9, 'tipo_piscina': 'Piscina Larga (50m)'},
         {'id_nadador': 2, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '100m Pecho', 'tiempo_formateado': '01:15,30', 'segundos_totales': 75.3, 'tipo_piscina': 'Piscina Corta (25m)'},
         {'id_nadador': 4, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '200m Combinado', 'tiempo_formateado': '02:10,80', 'segundos_totales': 130.8, 'tipo_piscina': 'Piscina Larga (50m)'},
     ])
-    
     usuarios_df = pd.DataFrame([
         {'id_usuario': 999, 'nombre': 'Super Master', 'rol': 'Master', 'grupos_asignados': [], 'email': 'master@club.cl', 'validado': True, 'clave': 'admin123'},
         {'id_usuario': 888, 'nombre': 'Junta Directiva', 'rol': 'Directiva', 'grupos_asignados': [], 'email': 'directiva@club.cl', 'validado': True, 'clave': '1234'},
@@ -204,7 +223,6 @@ def cargar_datos():
         {'id_usuario': 4, 'nombre': 'Pedro', 'rol': 'Nadador', 'grupos_asignados': [], 'email': 'pedro@club.cl', 'validado': True, 'clave': '1234'},
         {'id_usuario': 99, 'nombre': 'Usuario Nuevo', 'rol': 'Pendiente', 'grupos_asignados': [], 'email': 'nuevo@gmail.com', 'validado': False, 'clave': '1234'},
     ])
-    
     marcas_minimas_df = pd.DataFrame([
         {'categoria': 'Infantil A', 'estilo': '50m Libre', 'sexo': 'Femenino', 'segundos': 32.0},
         {'categoria': 'Infantil A', 'estilo': '50m Libre', 'sexo': 'Masculino', 'segundos': 30.0},
@@ -215,8 +233,12 @@ def cargar_datos():
         {'categoria': 'Mayor', 'estilo': '50m Libre', 'sexo': 'Femenino', 'segundos': 24.0},
         {'categoria': 'Mayor', 'estilo': '50m Libre', 'sexo': 'Masculino', 'segundos': 22.0},
     ])
-    
-    return nadadores_df, tiempos_df, usuarios_df, marcas_minimas_df
+    return (
+        nadadores_df, tiempos_df, usuarios_df, marcas_minimas_df,
+        pd.DataFrame(columns=_cols_inc), pd.DataFrame(columns=_cols_tst),
+        pd.DataFrame(columns=_cols_res), pd.DataFrame(columns=_cols_dfis),
+        pd.DataFrame(columns=_cols_tent)
+    )
 
 # --- Definición de las Páginas como Funciones ---
 
@@ -546,23 +568,23 @@ def mostrar_asistencia():
     st.subheader(f"Lista de nadadores para el grupo: {grupo_seleccionado}")
 
     asistencia_df = nadadores_del_grupo[['id_nadador', 'nombre']].copy()
-    asistencia_df['estado'] = 'Ausente'
+    asistencia_df['presente'] = False
 
     edited_df = st.data_editor(
         asistencia_df,
         column_config={
             "id_nadador": None,
             "nombre": st.column_config.TextColumn("Nadador", disabled=True),
-            "estado": st.column_config.SelectboxColumn("Asistencia", options=["Presente", "Ausente"], required=True)
+            "presente": st.column_config.CheckboxColumn("¿Presente?", default=False)
         },
         use_container_width=True,
         hide_index=True,
-        disabled=solo_lectura  # Directiva/Master solo ven, no editan
+        disabled=solo_lectura
     )
 
     if not solo_lectura:
         if st.button("Guardar Asistencia", type="primary"):
-            presentes = edited_df[edited_df['estado'] == 'Presente']
+            presentes = edited_df[edited_df['presente'] == True]
             supabase = init_connection()
             if supabase:
                 fecha_str = fecha_seleccionada.strftime('%Y-%m-%d')
@@ -574,6 +596,67 @@ def mostrar_asistencia():
                         st.error(f"Error BD al guardar asistencias: {e}")
             st.success(f"Asistencia guardada para el {fecha_seleccionada.strftime('%d-%m-%Y')}. {len(presentes)} nadador(es) presente(s).")
 
+    # --- Sección de Incidencias de Clase ---
+    st.markdown("---")
+    st.subheader("📝 Incidencias de la Clase")
+
+    inc_df = st.session_state.get('incidencias_df', pd.DataFrame())
+    # Filtrar incidencias de la fecha y grupo seleccionados
+    if not inc_df.empty and 'fecha' in inc_df.columns:
+        fecha_str_inc = fecha_seleccionada.strftime('%Y-%m-%d')
+        inc_hoy = inc_df[
+            (inc_df['fecha'].astype(str) == fecha_str_inc) &
+            (inc_df['grupo'].astype(str) == grupo_seleccionado)
+        ] if 'grupo' in inc_df.columns else inc_df[inc_df['fecha'].astype(str) == fecha_str_inc]
+        if not inc_hoy.empty:
+            for _, row in inc_hoy.iterrows():
+                tipo_icon = {"Nadador Individual": "👤", "Clase Completa": "🚨", "Test Federación": "🏁"}.get(str(row.get('tipo','')), "📌")
+                st.info(f"{tipo_icon} **{row.get('tipo','')}** — {row.get('descripcion','')}")
+        else:
+            st.caption("No hay incidencias registradas para esta clase.")
+    else:
+        st.caption("No hay incidencias registradas aún.")
+
+    if not solo_lectura:
+        with st.expander("➕ Registrar Nueva Incidencia"):
+            with st.form("form_incidencia"):
+                tipo_inc = st.selectbox(
+                    "Tipo de Incidencia:",
+                    ["Nadador Individual", "Clase Completa", "Test Federación"]
+                )
+                nadador_inc = None
+                if tipo_inc == "Nadador Individual":
+                    opciones_nad = nadadores_del_grupo['nombre'].tolist()
+                    nadador_inc_nombre = st.selectbox("Nadador afectado:", opciones_nad)
+                    fila_nad = nadadores_del_grupo[nadadores_del_grupo['nombre'] == nadador_inc_nombre]
+                    nadador_inc = int(fila_nad.iloc[0]['id_nadador']) if not fila_nad.empty else None
+
+                descripcion_inc = st.text_area(
+                    "Descripción:",
+                    placeholder="Describe la incidencia. Ej: El nadador se retiró antes por mareos. / Clase suspendida por corte de luz."
+                )
+                if st.form_submit_button("💾 Guardar Incidencia", type="primary"):
+                    if descripcion_inc.strip():
+                        rec_inc = {
+                            "fecha": fecha_seleccionada.strftime('%Y-%m-%d'),
+                            "grupo": grupo_seleccionado,
+                            "tipo": tipo_inc,
+                            "id_nadador": nadador_inc,
+                            "descripcion": descripcion_inc.strip()
+                        }
+                        supabase = init_connection()
+                        if supabase:
+                            try:
+                                supabase.table("incidencias_clase").insert(rec_inc).execute()
+                                st.success("✅ Incidencia registrada correctamente.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error BD: {e}")
+                        else:
+                            st.success("Modo local: Incidencia guardada (simulado).")
+                    else:
+                        st.error("La descripción no puede estar vacía.")
+
 
 def registrar_tiempos():
     st.header("Registrar Nuevos Tiempos ⏱️")
@@ -581,212 +664,352 @@ def registrar_tiempos():
         st.warning("Sección restringida.")
         return
 
+    import io as _io
+
     estilos_natacion = [
         '50 Libre', '100 Libre', '200 Libre', '400 Libre', '800 Libre', '1500 Libre',
         '50 Espalda', '100 Espalda', '200 Espalda', '50 Pecho', '100 Pecho', '200 Pecho',
         '50 Mariposa', '100 Mariposa', '200 Mariposa', '100 IM', '200 IM', '400 IM'
     ]
+    _nad_df = st.session_state.nadadores_df.copy()
+    _id_col = 'id_nadador' if 'id_nadador' in _nad_df.columns else 'id'
+    nadadores = _nad_df['nombre'].tolist()
 
-    nadadores = st.session_state.nadadores_df['nombre'].tolist()
-    nadador_seleccionado = st.selectbox("Seleccionar Nadador:", nadadores)
+    tab_comp, tab_ent = st.tabs(["🏆 Competencia", "🏋️ Entrenamiento"])
 
-    tab1, tab2 = st.tabs(["Registro Manual", "Carga Masiva"])
-    
-    with tab1:
-        with st.form("form_tiempos"):
-            col1, col2 = st.columns(2)
-            with col1:
-                fecha = st.date_input("Fecha", datetime.today())
-                estilo = st.selectbox("Estilo:", estilos_natacion)
-            with col2:
-                lugar = st.text_input("Lugar / Competencia")
-                tiempo_input = st.text_input("Tiempo (MM:SS,MS)", placeholder="01:05,50")
-            tipo_piscina = st.selectbox(
-                "Tipo de Piscina:",
-                ["Piscina Corta (25m)", "Piscina Larga (50m)"],
-                format_func=lambda x: f"🏊 {x}" if "Corta" in x else f"🌊 {x}"
-            )
-            
-            if st.form_submit_button("Guardar Tiempo"):
-                secs = convertir_tiempo_a_segundos(tiempo_input)
-                supabase = init_connection()
-                if supabase:
-                    # Buscar el id del nadador de forma robusta
-                    nadador_row = st.session_state.nadadores_df[
-                        st.session_state.nadadores_df['nombre'] == nadador_seleccionado
-                    ]
-                    id_nad = None
-                    if not nadador_row.empty:
-                        fila = nadador_row.iloc[0]
-                        # Intentar con 'id_nadador' primero, luego 'id'
-                        for col_id in ['id_nadador', 'id']:
-                            if col_id in fila.index and pd.notna(fila[col_id]):
-                                id_nad = fila[col_id]
-                                break
-                    
-                    # Si no se encontró localmente, consultar Supabase directamente
-                    if id_nad is None:
+    # ══════════════════════════════════════════════════════════
+    # PESTAÑA 1 — COMPETENCIA
+    # ══════════════════════════════════════════════════════════
+    with tab_comp:
+        c1, c2 = st.tabs(["📝 Registro Individual", "📥 Carga Masiva"])
+
+        with c1:
+            nadador_sel = st.selectbox("Nadador:", nadadores, key="nad_comp")
+            with st.form("form_tiempos_comp"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    fecha        = st.date_input("Fecha", datetime.today(), key="fecha_comp")
+                    estilo       = st.selectbox("Estilo:", estilos_natacion)
+                with col2:
+                    lugar        = st.text_input("Lugar / Competencia")
+                    tiempo_input = st.text_input("Tiempo (MM:SS,MS)", placeholder="01:05,50")
+                tipo_piscina = st.selectbox(
+                    "Tipo de Piscina:",
+                    ["Piscina Corta (25m)", "Piscina Larga (50m)"],
+                    format_func=lambda x: f"🏊 {x}" if "Corta" in x else f"🌊 {x}"
+                )
+                if st.form_submit_button("💾 Guardar Tiempo", type="primary"):
+                    secs    = convertir_tiempo_a_segundos(tiempo_input)
+                    sb      = init_connection()
+                    id_nad  = None
+                    nad_row = _nad_df[_nad_df['nombre'] == nadador_sel]
+                    if not nad_row.empty:
+                        for c_id in ['id_nadador', 'id']:
+                            if c_id in nad_row.iloc[0].index and pd.notna(nad_row.iloc[0][c_id]):
+                                id_nad = nad_row.iloc[0][c_id]; break
+                    if sb and id_nad is None:
                         try:
-                            res = supabase.table("nadadores").select("id").eq("nombre", nadador_seleccionado).execute()
-                            if res.data:
-                                id_nad = res.data[0]['id']
-                        except Exception:
-                            pass
-                    
-                    if id_nad is None:
-                        st.error(f"No se pudo encontrar el ID de '{nadador_seleccionado}'. Recarga la página e intenta de nuevo.")
-                    else:
-                        try:
-                            supabase.table("tiempos").insert({
-                                "id_nadador": int(id_nad), 
-                                "fecha": fecha.strftime('%Y-%m-%d'),
-                                "lugar": lugar, 
-                                "estilo": estilo, 
-                                "tiempo_formateado": tiempo_input,
-                                "segundos_totales": secs,
-                                "tipo_piscina": tipo_piscina
-                            }).execute()
-                            st.success(f"Guardado: {tiempo_input} ({secs}s)")
-                        except Exception as e:
-                            st.error(f"Error BD: {e}")
-                else:
-                    st.success("Modo local: Tiempo guardado (simulado).")
-    with tab2:
-        st.markdown("### 📥 Descargar Plantilla y Cargar Datos")
-        st.info(
-            "💡 **Pasos:**  \n"
-            "1. Descarga la plantilla — ya tiene los nombres e IDs reales de los nadadores.  \n"
-            "2. Completa las columnas en blanco: **fecha, lugar, estilo, tipo\_piscina, tiempo\_formateado**.  \n"
-            "3. Puedes agregar más filas para el mismo nadador si tiene varios tiempos.  \n"
-            "4. **No modifiques** las columnas `id_nadador` ni `nombre`."
-        )
-
-        import io
-
-        # Generar plantilla con nadadores reales de Supabase
-        _nad_df = st.session_state.nadadores_df.copy()
-        _id_col_pl = 'id_nadador' if 'id_nadador' in _nad_df.columns else 'id'
-        plantilla_df = pd.DataFrame({
-            'id_nadador':       _nad_df[_id_col_pl].values,
-            'nombre':           _nad_df['nombre'].values,     # referencia para el entrenador
-            'fecha':            '',
-            'lugar':            '',
-            'estilo':           '',
-            'tipo_piscina':     '',
-            'tiempo_formateado': ''
-        })
-
-        csv_buffer = io.StringIO()
-        plantilla_df.to_csv(csv_buffer, index=False)
-
-        st.download_button(
-            label="📥 Descargar Plantilla con Nadadores Actuales",
-            data=csv_buffer.getvalue().encode('utf-8'),
-            file_name="plantilla_carga_tiempos.csv",
-            mime="text/csv"
-        )
-        
-        st.markdown("---")
-        
-        # 2. SECCIÓN DE CARGA
-        uploaded_file = st.file_uploader("Sube tu archivo corregido (CSV o Excel)", type=["csv", "xlsx"])
-        
-        if uploaded_file is not None:
-            try:
-                # Leer el archivo
-                if uploaded_file.name.endswith('.csv'):
-                    df_cargado = pd.read_csv(uploaded_file)
-                else:
-                    df_cargado = pd.read_excel(uploaded_file)
-                
-                st.write("🔍 Vista previa de los datos a subir:")
-                st.dataframe(df_cargado, use_container_width=True)
-                
-                if st.button("🚀 Confirmar e Insertar en Base de Datos", type="primary"):
-                    df_cargado['segundos_totales'] = df_cargado['tiempo_formateado'].apply(convertir_tiempo_a_segundos)
-
-                    # Descartar filas sin tiempo (el entrenador dejó la fila en blanco)
-                    df_insertar = df_cargado[df_cargado['tiempo_formateado'].notna() & (df_cargado['tiempo_formateado'].astype(str).str.strip() != '')].copy()
-
-                    # Excluir columna 'nombre' (es solo referencia, no existe en tabla tiempos)
-                    cols_tiempos = ['id_nadador', 'fecha', 'lugar', 'estilo', 'tipo_piscina', 'tiempo_formateado', 'segundos_totales']
-                    df_insertar = df_insertar[[c for c in cols_tiempos if c in df_insertar.columns]]
-
-                    if df_insertar.empty:
-                        st.warning("⚠️ No hay filas con tiempos para insertar. Asegúrate de completar la columna `tiempo_formateado`.")
-                    else:
-                        supabase = init_connection()
-                        if supabase:
-                            try:
-                                recs = df_insertar.to_dict('records')
-                                supabase.table("tiempos").insert(recs).execute()
-                                st.success(f"✅ ¡Éxito! Se han registrado {len(recs)} tiempos correctamente.")
-                                st.balloons()
-                            except Exception as e:
-                                st.error(f"❌ Error de Base de Datos: {e}")
+                            r = sb.table("nadadores").select("id").eq("nombre", nadador_sel).execute()
+                            if r.data: id_nad = r.data[0]['id']
+                        except: pass
+                    if sb:
+                        if id_nad is None:
+                            st.error(f"No se encontró el ID de '{nadador_sel}'.")
                         else:
-                            st.info("💡 Modo Prototipo: Los datos se procesaron pero no hay conexión a Supabase.")
-            
-            except Exception as e:
-                st.error(f"❌ Error al procesar el archivo: {e}")
-                st.info("Asegúrate de no haber cambiado los nombres de las columnas en el CSV.")
+                            try:
+                                sb.table("tiempos").insert({
+                                    "id_nadador": int(id_nad), "fecha": fecha.strftime('%Y-%m-%d'),
+                                    "lugar": lugar, "estilo": estilo,
+                                    "tiempo_formateado": tiempo_input,
+                                    "segundos_totales": secs, "tipo_piscina": tipo_piscina
+                                }).execute()
+                                st.success(f"✅ Guardado: {tiempo_input} ({secs}s)")
+                            except Exception as e:
+                                st.error(f"Error BD: {e}")
+                    else:
+                        st.success("Modo local: Tiempo guardado (simulado).")
+
+        with c2:
+            st.info(
+                "💡 **Pasos:**  \n"
+                "1. Descarga la plantilla — ya tiene los nombres e IDs reales de los nadadores.  \n"
+                "2. Completa: **fecha, lugar, estilo, tipo_piscina, tiempo_formateado**.  \n"
+                "3. **No modifiques** las columnas `id_nadador` ni `nombre`."
+            )
+            plantilla_comp = pd.DataFrame({
+                'id_nadador': _nad_df[_id_col].values, 'nombre': _nad_df['nombre'].values,
+                'fecha': '', 'lugar': '', 'estilo': '', 'tipo_piscina': '', 'tiempo_formateado': ''
+            })
+            buf_comp = _io.StringIO()
+            plantilla_comp.to_csv(buf_comp, index=False)
+            st.download_button("📥 Descargar Plantilla de Competencia",
+                               buf_comp.getvalue().encode('utf-8'),
+                               "plantilla_carga_tiempos.csv", "text/csv")
+            st.markdown("---")
+            up_comp = st.file_uploader("Sube tu archivo (CSV o Excel)", type=["csv","xlsx"], key="up_comp")
+            if up_comp:
+                try:
+                    df_comp = pd.read_csv(up_comp) if up_comp.name.endswith('.csv') else pd.read_excel(up_comp)
+                    st.write("🔍 Vista previa:")
+                    st.dataframe(df_comp, use_container_width=True)
+                    if st.button("🚀 Insertar Tiempos de Competencia", type="primary"):
+                        df_comp['segundos_totales'] = df_comp['tiempo_formateado'].apply(convertir_tiempo_a_segundos)
+                        df_ins = df_comp[df_comp['tiempo_formateado'].notna() & (df_comp['tiempo_formateado'].astype(str).str.strip() != '')].copy()
+                        df_ins = df_ins[[c for c in ['id_nadador','fecha','lugar','estilo','tipo_piscina','tiempo_formateado','segundos_totales'] if c in df_ins.columns]]
+                        if df_ins.empty:
+                            st.warning("⚠️ No hay filas con tiempos para insertar.")
+                        else:
+                            sb = init_connection()
+                            if sb:
+                                try:
+                                    sb.table("tiempos").insert(df_ins.to_dict('records')).execute()
+                                    st.success(f"✅ {len(df_ins)} tiempos de competencia registrados.")
+                                    st.balloons()
+                                except Exception as e: st.error(f"❌ Error BD: {e}")
+                            else:
+                                st.info("💡 Modo Prototipo: sin conexión a Supabase.")
+                except Exception as e:
+                    st.error(f"❌ Error al procesar archivo: {e}")
+
+    # ══════════════════════════════════════════════════════════
+    # PESTAÑA 2 — ENTRENAMIENTO
+    # ══════════════════════════════════════════════════════════
+    with tab_ent:
+        e1, e2 = st.tabs(["📝 Registro Individual", "📥 Carga Masiva"])
+
+        with e1:
+            nad_ent_sel = st.selectbox("Nadador:", nadadores, key="nad_ent")
+            with st.form("form_tiempos_ent"):
+                ce1, ce2 = st.columns(2)
+                with ce1:
+                    fecha_ent  = st.date_input("Fecha", datetime.today(), key="fecha_ent")
+                    prueba_ent = st.text_input("Prueba", placeholder="Ej: 200m Libre, 4×100m Espalda")
+                    serie_ent  = st.number_input("Nº de serie", min_value=1, max_value=50, value=1)
+                with ce2:
+                    tipo_p_ent = st.selectbox("Tipo de Piscina:", ["Piscina Corta (25m)", "Piscina Larga (50m)"], key="tipo_p_ent")
+                    tiempo_ent = st.text_input("Tiempo (MM:SS,MS)", placeholder="01:45,30")
+                    obs_ent    = st.text_input("Observaciones", placeholder="Opcional")
+                if st.form_submit_button("💾 Guardar Tiempo de Entrenamiento", type="primary"):
+                    if prueba_ent and tiempo_ent:
+                        secs_ent   = convertir_tiempo_a_segundos(tiempo_ent)
+                        nr          = _nad_df[_nad_df['nombre'] == nad_ent_sel]
+                        id_nad_ent  = int(nr.iloc[0][_id_col]) if not nr.empty else None
+                        if id_nad_ent:
+                            sb = init_connection()
+                            if sb:
+                                try:
+                                    sb.table("tiempos_entrenamiento").insert({
+                                        "id_nadador": id_nad_ent, "fecha": fecha_ent.strftime('%Y-%m-%d'),
+                                        "prueba": prueba_ent, "tiempo_formateado": tiempo_ent,
+                                        "segundos_totales": secs_ent, "serie": int(serie_ent),
+                                        "tipo_piscina": tipo_p_ent, "observaciones": obs_ent
+                                    }).execute()
+                                    st.success(f"✅ Guardado: {prueba_ent} — {tiempo_ent}")
+                                except Exception as e: st.error(f"Error BD: {e}")
+                            else:
+                                st.success("Modo local: Tiempo guardado (simulado).")
+                        else:
+                            st.error("No se encontró el nadador.")
+                    else:
+                        st.error("Completa al menos la prueba y el tiempo.")
+
+            # Historial del nadador seleccionado
+            tent_ss = st.session_state.get('tiempos_ent_df', pd.DataFrame())
+            if not tent_ss.empty and 'id_nadador' in tent_ss.columns:
+                nr2 = _nad_df[_nad_df['nombre'] == nad_ent_sel]
+                if not nr2.empty:
+                    hist_e = tent_ss[tent_ss['id_nadador'] == nr2.iloc[0][_id_col]]
+                    if not hist_e.empty:
+                        st.markdown(f"**Historial — {nad_ent_sel}:**")
+                        cols_h = [c for c in ['fecha','prueba','serie','tiempo_formateado','tipo_piscina','observaciones'] if c in hist_e.columns]
+                        st.dataframe(hist_e[cols_h].sort_values('fecha', ascending=False), use_container_width=True, hide_index=True)
+
+        with e2:
+            st.info(
+                "💡 **Pasos:**  \n"
+                "1. Descarga la plantilla — ya tiene los nombres e IDs de los nadadores.  \n"
+                "2. Completa: **fecha, prueba, serie, tipo_piscina, tiempo_formateado, observaciones**.  \n"
+                "3. **No modifiques** las columnas `id_nadador` ni `nombre`."
+            )
+            plantilla_ent = pd.DataFrame({
+                'id_nadador': _nad_df[_id_col].values, 'nombre': _nad_df['nombre'].values,
+                'fecha': '', 'prueba': '', 'serie': 1, 'tipo_piscina': '',
+                'tiempo_formateado': '', 'observaciones': ''
+            })
+            buf_ent = _io.StringIO()
+            plantilla_ent.to_csv(buf_ent, index=False)
+            st.download_button("📥 Descargar Plantilla de Entrenamiento",
+                               buf_ent.getvalue().encode('utf-8'),
+                               "plantilla_tiempos_entrenamiento.csv", "text/csv")
+            st.markdown("---")
+            up_ent = st.file_uploader("Sube tu archivo (CSV o Excel)", type=["csv","xlsx"], key="up_ent")
+            if up_ent:
+                try:
+                    df_eu = pd.read_csv(up_ent) if up_ent.name.endswith('.csv') else pd.read_excel(up_ent)
+                    st.dataframe(df_eu, use_container_width=True)
+                    if st.button("🚀 Insertar Tiempos de Entrenamiento", type="primary"):
+                        df_eu['segundos_totales'] = df_eu['tiempo_formateado'].apply(convertir_tiempo_a_segundos)
+                        df_ie = df_eu[df_eu['tiempo_formateado'].notna() & (df_eu['tiempo_formateado'].astype(str).str.strip() != '')].copy()
+                        df_ie = df_ie[[c for c in ['id_nadador','fecha','prueba','serie','tipo_piscina','tiempo_formateado','segundos_totales','observaciones'] if c in df_ie.columns]]
+                        if df_ie.empty:
+                            st.warning("⚠️ No hay filas con tiempos para insertar.")
+                        else:
+                            sb = init_connection()
+                            if sb:
+                                try:
+                                    sb.table("tiempos_entrenamiento").insert(df_ie.to_dict('records')).execute()
+                                    st.success(f"✅ ¡{len(df_ie)} registros cargados!")
+                                    st.balloons()
+                                except Exception as e: st.error(f"❌ Error BD: {e}")
+                            else:
+                                st.info("💡 Modo Prototipo: sin conexión a Supabase.")
+                except Exception as e:
+                    st.error(f"❌ Error al procesar archivo: {e}")
+
 
 def gestionar_nadadores():
-    """Muestra el panel de gestión de perfiles de los nadadores (categorías, grupo, sexo)."""
+    """Muestra el panel de gestión de perfiles de los nadadores."""
     st.header("👥 Gestión de Perfiles de Nadadores")
     if st.session_state.user_role not in ['Entrenador', 'Master']:
         st.error("Solamente los entrenadores autorizados pueden modificar los perfiles.")
         return
-        
-    st.write("Crea nuevos nadadores o edita el grupo, categoría y sexo de los nadadores actuales.")
-    
-    df = st.session_state.nadadores_df.copy()
-    if 'id' in df.columns:
-        df = df.drop(columns=['id'])
-        
-    # Definir categorías oficiales
-    cats_oficiales = ['Infantil A', 'Infantil B1', 'Infantil B2', 'Juvenil A1', 'Juvenil A2', 'Juvenil B', 'Mayores']
 
-    edited_df = st.data_editor(
-        df, 
-        use_container_width=True, 
-        num_rows="dynamic",
-        column_config={
-            "categoria": st.column_config.SelectboxColumn("Categoría", options=cats_oficiales, required=True),
-            "sexo": st.column_config.SelectboxColumn("Sexo", options=["Masculino", "Femenino"], required=True)
-        }
-    )
-    
-    if st.button("Guardar Perfiles", type="primary"):
-        st.session_state.nadadores_df = edited_df.copy()
-        supabase = init_connection()
-        if supabase:
-            try:
-                for _, row in edited_df.iterrows():
-                    r = row.to_dict()
-                    id_val = r.pop('id_nadador', None)
-                    # Limpiar valores NaN antes de enviar a Supabase
-                    r_clean = {k: v for k, v in r.items() if pd.notna(v)}
-                    if pd.notna(id_val):  # Nadador existente → actualizar
-                        supabase.table("nadadores").update(r_clean).eq("id", int(id_val)).execute()
-                    else:  # Nadador nuevo → insertar
-                        supabase.table("nadadores").insert(r_clean).execute()
+    tp1, tp2 = st.tabs(["Perfiles y Grupos", "📏 Datos Fisiológicos"])
 
-                # Recargar IDs frescos de Supabase para mantener sesión sincronizada
-                nad_fresh = supabase.table("nadadores").select("*").execute().data
-                if nad_fresh:
-                    fresh_df = pd.DataFrame(nad_fresh)
-                    if 'id' in fresh_df.columns:
-                        if 'id_nadador' in fresh_df.columns:
-                            fresh_df = fresh_df.drop(columns=['id_nadador'])
-                        fresh_df = fresh_df.rename(columns={'id': 'id_nadador'})
-                    st.session_state.nadadores_df = fresh_df
+    with tp1:
+        st.write("Crea nuevos nadadores o edita el grupo, categoría y sexo de los nadadores actuales.")
+        df = st.session_state.nadadores_df.copy()
+        if 'id' in df.columns:
+            df = df.drop(columns=['id'])
+        cats_oficiales = ['Infantil A', 'Infantil B1', 'Infantil B2', 'Juvenil A1', 'Juvenil A2', 'Juvenil B', 'Mayores']
+        edited_df = st.data_editor(
+            df, use_container_width=True, num_rows="dynamic",
+            column_config={
+                "categoria": st.column_config.SelectboxColumn("Categoría", options=cats_oficiales, required=True),
+                "sexo": st.column_config.SelectboxColumn("Sexo", options=["Masculino", "Femenino"], required=True)
+            }
+        )
+        if st.button("Guardar Perfiles", type="primary"):
+            st.session_state.nadadores_df = edited_df.copy()
+            supabase = init_connection()
+            if supabase:
+                try:
+                    for _, row in edited_df.iterrows():
+                        r = row.to_dict()
+                        id_val = r.pop('id_nadador', None)
+                        r_clean = {k: v for k, v in r.items() if pd.notna(v)}
+                        if pd.notna(id_val):
+                            supabase.table("nadadores").update(r_clean).eq("id", int(id_val)).execute()
+                        else:
+                            supabase.table("nadadores").insert(r_clean).execute()
+                    nad_fresh = supabase.table("nadadores").select("*").execute().data
+                    if nad_fresh:
+                        fresh_df = pd.DataFrame(nad_fresh)
+                        if 'id' in fresh_df.columns:
+                            if 'id_nadador' in fresh_df.columns:
+                                fresh_df = fresh_df.drop(columns=['id_nadador'])
+                            fresh_df = fresh_df.rename(columns={'id': 'id_nadador'})
+                        st.session_state.nadadores_df = fresh_df
+                    st.success("✅ Guardado seguro en Supabase.")
+                except Exception as e:
+                    st.error(f"Error Supabase guardando perfiles: {e}")
+            else:
+                st.success("Perfiles guardados en el Prototipo Temporal.")
 
-                st.success("✅ Guardado seguro en Supabase.")
-            except Exception as e:
-                st.error(f"Error Supabase guardando perfiles: {e}")
+    with tp2:
+        st.write("Registra y visualiza la evolución física de cada nadador. Incluye medidas clave para el rendimiento en natación.")
+        nad_fis_sel = st.selectbox("Selecciona un nadador:", st.session_state.nadadores_df['nombre'].tolist(), key="nad_fis")
+        nad_fis_row = st.session_state.nadadores_df[st.session_state.nadadores_df['nombre'] == nad_fis_sel]
+        id_nad_fis = int(nad_fis_row.iloc[0]['id_nadador']) if not nad_fis_row.empty else None
+
+        with st.form("form_datos_fisicos"):
+            st.markdown("**Medidas Antropométricas**")
+            cf1, cf2, cf3 = st.columns(3)
+            with cf1:
+                fecha_fis    = st.date_input("Fecha", datetime.today(), key="fecha_fis")
+                estatura     = st.number_input("Estatura (cm)", min_value=50.0, max_value=250.0, value=160.0, step=0.5, help="Talla de pie sin calzado")
+            with cf2:
+                peso         = st.number_input("Peso (kg)", min_value=10.0, max_value=200.0, value=55.0, step=0.1)
+                envergadura  = st.number_input("Envergadura de brazos (cm)", min_value=50.0, max_value=300.0, value=165.0, step=0.5,
+                                               help="Distancia punta a punta con los brazos extendidos horizontalmente")
+            with cf3:
+                talla_sent   = st.number_input("Talla sentado (cm)", min_value=30.0, max_value=160.0, value=85.0, step=0.5,
+                                               help="Altura desde la silla hasta la coronilla. Indica longitud de tronco.")
+                porc_grasa   = st.number_input("% Grasa corporal", min_value=0.0, max_value=60.0, value=15.0, step=0.1,
+                                               help="Porcentaje de masa grasa estimado (pliegues cutáneos o bioimpedancia)")
+            obs_fis = st.text_input("Observaciones", placeholder="Opcional")
+
+            if st.form_submit_button("💾 Guardar Datos Físicos", type="primary"):
+                if id_nad_fis:
+                    rec_fis = {
+                        "id_nadador": id_nad_fis,
+                        "fecha": fecha_fis.strftime('%Y-%m-%d'),
+                        "estatura_cm": estatura, "peso_kg": peso,
+                        "envergadura_cm": envergadura, "talla_sentado_cm": talla_sent,
+                        "porc_grasa": porc_grasa, "observaciones": obs_fis
+                    }
+                    supabase = init_connection()
+                    if supabase:
+                        try:
+                            supabase.table("datos_fisicos").insert(rec_fis).execute()
+                            st.success("✅ Datos físicos guardados.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error BD: {e}")
+                    else:
+                        st.success("Modo local: Datos guardados (simulado).")
+
+        # ── Historial tabular + gráficas ──
+        dfis = st.session_state.get('datos_fisicos_df', pd.DataFrame())
+        if not dfis.empty and 'id_nadador' in dfis.columns and id_nad_fis:
+            hist_fis = dfis[dfis['id_nadador'] == id_nad_fis].copy()
+            if not hist_fis.empty:
+                hist_fis['fecha'] = pd.to_datetime(hist_fis['fecha'])
+                hist_fis = hist_fis.sort_values('fecha')
+                # IMC calculado
+                if 'peso_kg' in hist_fis.columns and 'estatura_cm' in hist_fis.columns:
+                    hist_fis['IMC'] = (hist_fis['peso_kg'] / ((hist_fis['estatura_cm']/100)**2)).round(2)
+                # Índice Envergadura/Estatura (bueno en natación si > 1)
+                if 'envergadura_cm' in hist_fis.columns and 'estatura_cm' in hist_fis.columns:
+                    hist_fis['Env/Est'] = (hist_fis['envergadura_cm'] / hist_fis['estatura_cm']).round(3)
+
+                st.markdown(f"**Historial Fisiológico — {nad_fis_sel}:**")
+                cols_fis = [c for c in ['fecha','estatura_cm','peso_kg','IMC','envergadura_cm','Env/Est','talla_sentado_cm','porc_grasa','observaciones'] if c in hist_fis.columns]
+                st.dataframe(hist_fis[cols_fis], use_container_width=True, hide_index=True)
+
+                # Gráfica 1: Estatura, Envergadura y Talla sentado
+                fig_talla = go.Figure()
+                fig_talla.add_trace(go.Scatter(x=hist_fis['fecha'], y=hist_fis['estatura_cm'], name='Estatura (cm)', line=dict(color='#1f77b4', width=2)))
+                if 'envergadura_cm' in hist_fis.columns:
+                    fig_talla.add_trace(go.Scatter(x=hist_fis['fecha'], y=hist_fis['envergadura_cm'], name='Envergadura (cm)', line=dict(color='#2ca02c', width=2, dash='dash')))
+                if 'talla_sentado_cm' in hist_fis.columns:
+                    fig_talla.add_trace(go.Scatter(x=hist_fis['fecha'], y=hist_fis['talla_sentado_cm'], name='Talla sentado (cm)', line=dict(color='#9467bd', width=2, dash='dot')))
+                fig_talla.update_layout(
+                    title=f"Medidas de Longitud — {nad_fis_sel}",
+                    xaxis=dict(title="Fecha"), yaxis=dict(title="cm"),
+                    legend=dict(orientation='h', y=-0.25), height=320,
+                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+                )
+                st.plotly_chart(fig_talla, use_container_width=True)
+
+                # Gráfica 2: Peso y % Grasa
+                fig_comp = go.Figure()
+                fig_comp.add_trace(go.Scatter(x=hist_fis['fecha'], y=hist_fis['peso_kg'], name='Peso (kg)', line=dict(color='#e07b00', width=2)))
+                if 'porc_grasa' in hist_fis.columns:
+                    fig_comp.add_trace(go.Scatter(x=hist_fis['fecha'], y=hist_fis['porc_grasa'], name='% Grasa', line=dict(color='#d62728', width=2, dash='dash'), yaxis='y2'))
+                fig_comp.update_layout(
+                    title=f"Composición Corporal — {nad_fis_sel}",
+                    xaxis=dict(title="Fecha"),
+                    yaxis=dict(title="Peso (kg)"),
+                    yaxis2=dict(title="% Grasa", overlaying='y', side='right'),
+                    legend=dict(orientation='h', y=-0.25), height=320,
+                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+                )
+                st.plotly_chart(fig_comp, use_container_width=True)
+            else:
+                st.info("Aún no hay datos fisiológicos registrados para este nadador.")
         else:
-            st.success("Perfiles guardados en el Prototipo Temporal.")
+            st.info("Aún no hay datos fisiológicos registrados.")
 
 def configurar_marcas():
     """Muestra el contenido de la configuración de Marcas Mínimas por Categoría."""
@@ -910,6 +1133,130 @@ def panel_master():
     st.markdown("---")
     st.subheader("Directorio de Usuarios Activos")
     st.dataframe(st.session_state.usuarios_df[['id_usuario', 'nombre', 'email', 'rol']], hide_index=True, use_container_width=True)
+
+
+def mostrar_tests():
+    """Gestión de Tests de Rendimiento de la Federación."""
+    st.header("🏁 Tests de Rendimiento")
+    rol = st.session_state.user_role
+    if rol not in ['Entrenador', 'Master', 'Directiva']:
+        st.warning("Sección no disponible para tu perfil.")
+        return
+    solo_lectura = (rol == 'Directiva')
+
+    tv1, tv2, tv3 = st.tabs(["Ver Tests", "Crear Test", "Registrar Resultados"])
+
+    # ── PESTAÑA 1: Ver Historial ──────────────────────────────────────────────
+    with tv1:
+        tst_df = st.session_state.get('tests_df', pd.DataFrame())
+        res_df = st.session_state.get('resultados_test_df', pd.DataFrame())
+        if tst_df.empty:
+            st.info("No hay tests registrados aún. Usa la pestaña 'Crear Test'.")
+        else:
+            grupos_t = ['Todos'] + sorted(tst_df['grupo'].dropna().unique().tolist()) if 'grupo' in tst_df.columns else ['Todos']
+            filtro_t = st.selectbox("Filtrar por grupo:", grupos_t, key="tst_filtro")
+            df_show = tst_df if filtro_t == 'Todos' else tst_df[tst_df['grupo'] == filtro_t]
+            for _, test in df_show.iterrows():
+                with st.expander(f"📌 {test.get('nombre','')} — {test.get('fecha','')} | Grupo: {test.get('grupo','')}"):
+                    if test.get('descripcion'):
+                        st.write(f"**Descripción:** {test['descripcion']}")
+                    t_id = test.get('id', -1)
+                    if not res_df.empty and 'id_test' in res_df.columns:
+                        res_t = res_df[res_df['id_test'] == t_id]
+                        if not res_t.empty:
+                            st.markdown("**Resultados:**")
+                            nad_ref = st.session_state.nadadores_df[['id_nadador', 'nombre']]
+                            merged = res_t.merge(nad_ref, on='id_nadador', how='left') if 'id_nadador' in res_t.columns else res_t
+                            cols_r = [c for c in ['nombre', 'resultado', 'observaciones'] if c in merged.columns]
+                            st.dataframe(merged[cols_r], use_container_width=True, hide_index=True)
+                        else:
+                            st.caption("Sin resultados registrados para este test.")
+
+    # ── PESTAÑA 2: Crear Test ─────────────────────────────────────────────────
+    with tv2:
+        if solo_lectura:
+            st.info("👁️ Solo lectura — no puedes crear tests.")
+        else:
+            with st.form("form_crear_test"):
+                ct1, ct2 = st.columns(2)
+                with ct1:
+                    nombre_t = st.text_input("Nombre del Test", placeholder="Ej: 10×400m Libre")
+                    fecha_t  = st.date_input("Fecha", datetime.today(), key="fecha_test")
+                with ct2:
+                    grupo_t  = st.selectbox("Grupo", ['Competitivo', 'Precompetitivo', 'Elite', 'Formativo', 'Todos'])
+                    desc_t   = st.text_area("Descripción", placeholder="Ej: 10 rep. de 400m libre con 30s descanso")
+                if st.form_submit_button("✅ Crear Test", type="primary"):
+                    if nombre_t.strip():
+                        rec_t = {"nombre": nombre_t, "fecha": fecha_t.strftime('%Y-%m-%d'), "grupo": grupo_t, "descripcion": desc_t}
+                        sb = init_connection()
+                        if sb:
+                            try:
+                                sb.table("tests").insert(rec_t).execute()
+                                st.success(f"✅ Test '{nombre_t}' creado.")
+                                st.rerun()
+                            except Exception as e: st.error(f"Error BD: {e}")
+                        else:
+                            st.success("Modo local: Test creado (simulado).")
+                    else:
+                        st.error("El nombre del test es obligatorio.")
+
+    # ── PESTAÑA 3: Registrar Resultados ───────────────────────────────────────
+    with tv3:
+        if solo_lectura:
+            st.info("👁️ Solo lectura.")
+        else:
+            tst_df2 = st.session_state.get('tests_df', pd.DataFrame())
+            if tst_df2.empty:
+                st.warning("Primero crea un test en la pestaña anterior.")
+            else:
+                opciones_t = tst_df2.apply(lambda r: f"{r.get('nombre','')} ({r.get('fecha','')})", axis=1).tolist()
+                idx_t = st.selectbox("Selecciona el Test:", range(len(opciones_t)), format_func=lambda i: opciones_t[i])
+                test_row = tst_df2.iloc[idx_t]
+                test_id  = test_row.get('id')
+                grupo_ts = test_row.get('grupo', 'Todos')
+
+                nad_df2  = st.session_state.nadadores_df
+                nads_filtrados = nad_df2 if grupo_ts == 'Todos' else nad_df2[nad_df2['grupo'] == grupo_ts]
+
+                if nads_filtrados.empty:
+                    st.warning("No hay nadadores en este grupo.")
+                else:
+                    res_input = pd.DataFrame({
+                        'id_nadador':   nads_filtrados['id_nadador'].values,
+                        'nombre':       nads_filtrados['nombre'].values,
+                        'resultado':    '',
+                        'observaciones': ''
+                    })
+                    st.write(f"**Test:** {test_row.get('nombre', '')}")
+                    edited_r = st.data_editor(
+                        res_input,
+                        column_config={
+                            "id_nadador": None,
+                            "nombre": st.column_config.TextColumn("Nadador", disabled=True),
+                            "resultado": st.column_config.TextColumn("Resultado"),
+                            "observaciones": st.column_config.TextColumn("Observaciones")
+                        },
+                        use_container_width=True, hide_index=True, num_rows="fixed"
+                    )
+                    if st.button("💾 Guardar Resultados del Test", type="primary"):
+                        validos = edited_r[edited_r['resultado'].astype(str).str.strip() != '']
+                        if validos.empty:
+                            st.warning("No hay resultados para guardar.")
+                        else:
+                            recs_r = [{"id_test": int(test_id), "id_nadador": int(r['id_nadador']),
+                                       "resultado": r['resultado'], "observaciones": r.get('observaciones','')
+                                      } for _, r in validos.iterrows()]
+                            sb2 = init_connection()
+                            if sb2:
+                                try:
+                                    sb2.table("resultados_test").insert(recs_r).execute()
+                                    st.success(f"✅ {len(recs_r)} resultados guardados.")
+                                    st.rerun()
+                                except Exception as e: st.error(f"Error BD: {e}")
+                            else:
+                                st.success("Modo local: Resultados guardados (simulado).")
+
+
 # --- Lógica Principal de la Aplicación ---
 
 # Inicializar st.session_state
@@ -919,11 +1266,19 @@ if 'logged_in' not in st.session_state:
     st.session_state.user_name = None
     st.session_state.user_info = None
     # Cargar datos una sola vez (desde BD si existe, si no locales)
-    nadadores_df, tiempos_df, usuarios_df, marcas_df = cargar_datos()
-    st.session_state.nadadores_df = nadadores_df
-    st.session_state.tiempos_df = tiempos_df
-    st.session_state.usuarios_df = usuarios_df
-    st.session_state.marcas_df = marcas_df
+    (
+        nadadores_df, tiempos_df, usuarios_df, marcas_df,
+        incidencias_df, tests_df, resultados_test_df, datos_fisicos_df, tiempos_ent_df
+    ) = cargar_datos()
+    st.session_state.nadadores_df         = nadadores_df
+    st.session_state.tiempos_df           = tiempos_df
+    st.session_state.usuarios_df          = usuarios_df
+    st.session_state.marcas_df            = marcas_df
+    st.session_state.incidencias_df       = incidencias_df
+    st.session_state.tests_df             = tests_df
+    st.session_state.resultados_test_df   = resultados_test_df
+    st.session_state.datos_fisicos_df     = datos_fisicos_df
+    st.session_state.tiempos_ent_df       = tiempos_ent_df
 
 # --- Pantalla de Login ---
 if not st.session_state.logged_in:
@@ -967,13 +1322,12 @@ if not st.session_state.logged_in:
 else:
     # --- Menú de Navegación Condicional ---
     opciones_menu = ["📊 Dashboard"]
-    if st.session_state.user_role in ['Directiva', 'Master']:
+    if st.session_state.user_role in ['Entrenador', 'Directiva', 'Master']:
         opciones_menu.append("🗓️ Asistencia")
     if st.session_state.user_role in ['Entrenador', 'Master']:
         opciones_menu.append("👥 Perfiles")
     if st.session_state.user_role in ['Entrenador', 'Master', 'Directiva']:
-        opciones_menu.extend(["⏱️ Registrar Tiempos", "⚙️ Configurar Marcas"])
-        
+        opciones_menu.extend(["⏱️ Registrar Tiempos", "⚙️ Configurar Marcas", "🏁 Tests"])
     if st.session_state.user_role == 'Master':
         opciones_menu.append("🛡️ Admin Usuarios")
     
@@ -1028,5 +1382,7 @@ else:
         gestionar_nadadores()
     elif page == "⚙️ Configurar Marcas":
         configurar_marcas()
+    elif page == "🏁 Tests":
+        mostrar_tests()
     elif page == "🛡️ Admin Usuarios":
         panel_master()
