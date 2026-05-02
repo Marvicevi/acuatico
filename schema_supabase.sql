@@ -1,3 +1,7 @@
+-- BORRADO PREVIO PARA EVITAR ERRORES (CASCADE borra las tablas que dependen de ellos)
+DROP TABLE IF EXISTS asistencias, tiempos, nadadores, marcas_minimas, usuarios, incidencias_clase, tests, resultados_test, datos_fisicos, tiempos_entrenamiento CASCADE;
+DROP TYPE IF EXISTS tipo_rol, tipo_sexo, tipo_estilo, tipo_categoria CASCADE;
+
 -- ==========================================
 -- SCRIPT DE INICIALIZACIÓN V2: SUPABASE (Con Menús Desplegables)
 -- ==========================================
@@ -5,6 +9,21 @@
 -- 0. CREACIÓN DE LISTAS DESPLEGABLES ESTRICTAS (ENUMs)
 CREATE TYPE tipo_rol AS ENUM ('Nadador', 'Entrenador', 'Directiva', 'Master', 'Pendiente');
 CREATE TYPE tipo_sexo AS ENUM ('Masculino', 'Femenino', 'Ambos');
+
+-- 0.1 CREACIÓN DE LISTA DE ESTILOS (ENUM)
+CREATE TYPE tipo_estilo AS ENUM (
+    '50 Libre', '100 Libre', '200 Libre', '400 Libre', '800 Libre', '1500 Libre',
+    '50 Espalda', '100 Espalda', '200 Espalda',
+    '50 Pecho', '100 Pecho', '200 Pecho',
+    '50 Mariposa', '100 Mariposa', '200 Mariposa',
+    '100 IM', '200 IM', '400 IM'
+);
+
+-- Nuevas Categorías solicitadas
+CREATE TYPE tipo_categoria AS ENUM (
+    'Infantil A', 'Infantil B1', 'Infantil B2', 
+    'Juvenil A1', 'Juvenil A2', 'Juvenil B', 'Mayores'
+);
 
 -- 1. Tabla de Usuarios (Autenticación y Roles)
 CREATE TABLE usuarios (
@@ -22,18 +41,20 @@ CREATE TABLE nadadores (
     id SERIAL PRIMARY KEY,
     nombre VARCHAR(100) NOT NULL,
     grupo VARCHAR(50), 
-    categoria VARCHAR(50),
+    categoria tipo_categoria NOT NULL,
     sexo tipo_sexo DEFAULT 'Masculino'
 );
 
--- 3. Tabla de Tiempos (Competencias)
+-- 3. Tabla de Tiempos
 CREATE TABLE tiempos (
     id SERIAL PRIMARY KEY,
     id_nadador INTEGER REFERENCES nadadores(id) ON DELETE CASCADE,
     fecha DATE NOT NULL,
     lugar VARCHAR(150),
-    estilo VARCHAR(50) NOT NULL,
-    tiempo_formateado VARCHAR(15) NOT NULL,
+    estilo tipo_estilo NOT NULL, -- Cambiado de VARCHAR a tipo_estilo
+    -- 'tiempo_formateado' guarda el texto "01:23,45" para mostrar en la app
+    tiempo_formateado VARCHAR(15) NOT NULL, 
+    -- 'segundos_totales' es lo que Supabase usa para ordenar de menor a mayor (el más rápido)
     segundos_totales FLOAT NOT NULL,
     tipo_piscina VARCHAR(30)
 );
@@ -47,21 +68,28 @@ CREATE TABLE asistencias (
     UNIQUE(id_nadador, fecha) 
 );
 
--- 5. Tabla de Marcas Mínimas (Objetivos separados por Sexo)
+-- ==========================================
+-- 5. DATOS INICIALES (Usuario Master)
+-- ==========================================
+INSERT INTO usuarios (nombre, email, clave, rol, validado) 
+VALUES ('Administrador Master', 'master@club.cl', 'admin123', 'Master', true);
+
+-- 6. Tabla de Marcas Mínimas (Objetivos separados por Sexo)
 CREATE TABLE marcas_minimas (
     id SERIAL PRIMARY KEY,
     categoria VARCHAR(50) NOT NULL,
-    estilo VARCHAR(50) NOT NULL,
+    estilo tipo_estilo NOT NULL, -- Cambiado de VARCHAR a tipo_estilo
     sexo tipo_sexo NOT NULL DEFAULT 'Masculino',
-    segundos FLOAT NOT NULL,
+    tiempo_objetivo VARCHAR(15), -- Formato MM:SS,MS
+    segundos_objetivo FLOAT NOT NULL,
     UNIQUE(categoria, estilo, sexo)
 );
 
 -- ==========================================
--- 6. NUEVAS TABLAS (V3)
+-- 7. NUEVAS TABLAS (V3)
 -- ==========================================
 
--- 6a. Incidencias de Clase
+-- 7a. Incidencias de Clase
 CREATE TABLE incidencias_clase (
     id SERIAL PRIMARY KEY,
     fecha DATE NOT NULL,
@@ -72,7 +100,7 @@ CREATE TABLE incidencias_clase (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
--- 6b. Tests de Rendimiento
+-- 7b. Tests de Rendimiento
 CREATE TABLE tests (
     id SERIAL PRIMARY KEY,
     nombre VARCHAR(150) NOT NULL,
@@ -82,7 +110,7 @@ CREATE TABLE tests (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
--- 6c. Resultados de Tests
+-- 7c. Resultados de Tests
 CREATE TABLE resultados_test (
     id SERIAL PRIMARY KEY,
     id_test INTEGER REFERENCES tests(id) ON DELETE CASCADE,
@@ -91,7 +119,7 @@ CREATE TABLE resultados_test (
     observaciones TEXT
 );
 
--- 6d. Datos Fisiológicos
+-- 7d. Datos Fisiológicos
 CREATE TABLE datos_fisicos (
     id SERIAL PRIMARY KEY,
     id_nadador INTEGER REFERENCES nadadores(id) ON DELETE CASCADE,
@@ -104,7 +132,7 @@ CREATE TABLE datos_fisicos (
     observaciones TEXT
 );
 
--- 6e. Tiempos de Entrenamiento
+-- 7e. Tiempos de Entrenamiento
 CREATE TABLE tiempos_entrenamiento (
     id SERIAL PRIMARY KEY,
     id_nadador INTEGER REFERENCES nadadores(id) ON DELETE CASCADE,
@@ -116,10 +144,3 @@ CREATE TABLE tiempos_entrenamiento (
     tipo_piscina VARCHAR(30),
     observaciones TEXT
 );
-
--- ==========================================
--- 7. DATOS INICIALES (Usuario Master)
--- ==========================================
-INSERT INTO usuarios (nombre, email, clave, rol, validado) 
-VALUES ('Administrador Master', 'master@club.cl', 'admin123', 'Master', true);
-
