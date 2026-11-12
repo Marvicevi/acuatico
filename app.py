@@ -4,6 +4,10 @@
 # y corre el comando: streamlit run app.py
 # ========================================
 
+import hashlib
+import hmac
+import time
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -48,6 +52,558 @@ def segundos_a_tiempo(secs):
         return str(secs)
 
 
+# Temporada en la que las categorías ya guardadas son válidas.
+# La edad FECHIDA es la cumplida al 31 de diciembre: año de temporada − año de nacimiento.
+# 2026 − 11 = 2015 para Infantil A. No usar 2011: en 2026 ese año es Juvenil A2 (15 años).
+ANIO_DE_CATEGORIAS_GUARDADAS = 2026
+
+# (edad desde, edad hasta, categoría). Juvenil A1 = 14 y Juvenil A2 = 15.
+TRAMOS_CATEGORIA = [
+    (8, 8, "Infantil E"),
+    (9, 9, "Infantil D"),
+    (10, 10, "Infantil C"),
+    (11, 11, "Infantil A"),
+    (12, 12, "Infantil B1"),
+    (13, 13, "Infantil B2"),
+    (14, 14, "Juvenil A1"),
+    (15, 15, "Juvenil A2"),
+    (16, 18, "Juvenil B"),
+    (19, 120, "Mayores"),
+]
+
+# Solo estas categorías permiten deducir un único año. Juvenil B y Mayores abarcan varios.
+EDAD_UNICA_POR_CATEGORIA = {
+    "Infantil E": 8,
+    "Infantil D": 9,
+    "Infantil C": 10,
+    "Infantil A": 11,
+    "Infantil B1": 12,
+    "Infantil B2": 13,
+    "Juvenil A1": 14,
+    "Juvenil A2": 15,
+}
+
+
+def _anio_entero(valor):
+    """Devuelve un año como int, o None si el valor está vacío."""
+    if valor is None:
+        return None
+    try:
+        if pd.isna(valor):
+            return None
+    except TypeError:
+        pass
+    try:
+        return int(float(valor))
+    except (TypeError, ValueError):
+        return None
+
+
+def anio_temporada_actual():
+    """Año cuyos 31 de diciembre definen la categoría vigente."""
+    return datetime.now().year
+
+
+def categoria_por_anio_nacimiento(anio_nacimiento, anio_temporada=None):
+    """Categoría FECHIDA a partir del año de nacimiento."""
+    anio = _anio_entero(anio_nacimiento)
+    if anio is None:
+        return None
+    temporada = int(anio_temporada or anio_temporada_actual())
+    edad = temporada - anio
+    for desde, hasta, nombre in TRAMOS_CATEGORIA:
+        if desde <= edad <= hasta:
+            return nombre
+    return None
+
+
+def anio_nacimiento_por_categoria(categoria, anio_referencia=None):
+    """Año de nacimiento deducido de una categoría de una sola edad. None si abarca varias."""
+    edad = EDAD_UNICA_POR_CATEGORIA.get(str(categoria or "").strip())
+    if edad is None:
+        return None
+    return int(anio_referencia or ANIO_DE_CATEGORIAS_GUARDADAS) - edad
+
+
+def aplicar_categoria_en_memoria(df):
+    """Recalcula la categoría en la copia local cuando el año de nacimiento ya está guardado."""
+    if df is None or df.empty or "anio_nacimiento" not in df.columns:
+        return df
+    df = df.copy()
+    for i, row in df.iterrows():
+        cat = categoria_por_anio_nacimiento(row.get("anio_nacimiento"))
+        if cat:
+            df.at[i, "categoria"] = cat
+    return df
+
+
+def sugerir_anios_nacimiento(df):
+    """Completa en pantalla el año que falta, solo si la categoría actual es de una sola edad."""
+    df = df.copy()
+    if "anio_nacimiento" not in df.columns:
+        df["anio_nacimiento"] = pd.NA
+    for i, row in df.iterrows():
+        if _anio_entero(row.get("anio_nacimiento")) is None:
+            sugerido = anio_nacimiento_por_categoria(row.get("categoria"))
+            if sugerido is not None:
+                df.at[i, "anio_nacimiento"] = sugerido
+        cat = categoria_por_anio_nacimiento(df.at[i, "anio_nacimiento"])
+        if cat:
+            df.at[i, "categoria"] = cat
+    return df
+
+
+def sincronizar_categorias_calculadas(supabase, df):
+    """Escribe la categoría calculada solo si ya hay año guardado y el texto cambió. No borra filas."""
+    if supabase is None or df is None or df.empty or "anio_nacimiento" not in df.columns:
+        return
+    if "id_nadador" not in df.columns:
+        return
+    for _, row in df.iterrows():
+        anio = _anio_entero(row.get("anio_nacimiento"))
+        id_nad = _anio_entero(row.get("id_nadador"))
+        if anio is None or id_nad is None:
+            continue
+        cat = categoria_por_anio_nacimiento(anio)
+        if not cat or cat == row.get("categoria"):
+            continue
+        try:
+            supabase.table("nadadores").update({"categoria": cat}).eq("id", id_nad).execute()
+        except Exception:
+            continue
+
+
+_ALIAS_COLUMNAS_MARCA = {
+    "categoria": "categoria",
+    "categoría": "categoria",
+    "estilo": "estilo",
+    "prueba": "estilo",
+    "sexo": "sexo",
+    "tiempo_objetivo": "tiempo_objetivo",
+    "tiempo": "tiempo_objetivo",
+    "tiempo_formateado": "tiempo_objetivo",
+    "marca": "tiempo_objetivo",
+}
+_SEXOS_MARCA = {"masculino": "Masculino", "femenino": "Femenino", "ambos": "Ambos"}
+
+
+def _estilo_canonico(texto, estilos):
+    """Acepta '50 Libre' y también '50m Libre', sin distinguir mayúsculas."""
+    bruto = " ".join(str(texto or "").strip().split())
+    if not bruto:
+        return None
+    por_nombre = {e.lower(): e for e in estilos}
+    if bruto.lower() in por_nombre:
+        return por_nombre[bruto.lower()]
+    token = bruto.lower()
+    for dist in ("1500", "800", "400", "200", "100", "50"):
+        token = token.replace(f"{dist}m", dist)
+    token = " ".join(token.split())
+    return por_nombre.get(token)
+
+
+def preparar_carga_marcas(df, categorias, estilos):
+    """Valida un CSV o Excel de marcas mínimas.
+
+    Devuelve registros listos para guardar, errores que impiden la carga
+    y avisos. Las filas sin tiempo se omiten. No borra marcas existentes.
+    """
+    trabajo = df.copy()
+    trabajo.columns = [str(c).strip().lower() for c in trabajo.columns]
+    trabajo = trabajo.rename(columns={c: _ALIAS_COLUMNAS_MARCA[c] for c in trabajo.columns if c in _ALIAS_COLUMNAS_MARCA})
+    faltan = [c for c in ("categoria", "estilo", "sexo", "tiempo_objetivo") if c not in trabajo.columns]
+    if faltan:
+        return [], [f"Faltan columnas: {', '.join(faltan)}. Usa categoria, estilo, sexo y tiempo_objetivo."], []
+
+    cats = {c.lower(): c for c in categorias}
+    errores = []
+    avisos = []
+    vistos = {}
+    for pos, (_, row) in enumerate(trabajo.iterrows()):
+        fila = pos + 2
+        tiempo_raw = row.get("tiempo_objetivo")
+        if pd.isna(tiempo_raw) or not str(tiempo_raw).strip():
+            continue
+        cat_in = str(row.get("categoria") or "").strip()
+        est_in = str(row.get("estilo") or "").strip()
+        sexo_in = str(row.get("sexo") or "").strip()
+        cat = cats.get(cat_in.lower())
+        est = _estilo_canonico(est_in, estilos)
+        sexo = _SEXOS_MARCA.get(sexo_in.lower())
+        problemas = []
+        if not cat:
+            problemas.append(f"categoría '{cat_in}'")
+        if not est:
+            problemas.append(f"estilo '{est_in}'")
+        if not sexo:
+            problemas.append(f"sexo '{sexo_in}'")
+        secs = convertir_tiempo_a_segundos(str(tiempo_raw).strip())
+        if secs <= 0:
+            problemas.append(f"tiempo '{tiempo_raw}'")
+        if problemas:
+            errores.append(f"Fila {fila}: " + ", ".join(problemas) + ".")
+            continue
+        clave = (cat, est, sexo)
+        if clave in vistos:
+            avisos.append(f"Fila {fila}: {cat} / {est} / {sexo} está repetida. Se usa este tiempo.")
+        vistos[clave] = {
+            "categoria": cat,
+            "estilo": est,
+            "sexo": sexo,
+            "tiempo_objetivo": str(tiempo_raw).strip(),
+            "segundos_objetivo": secs,
+        }
+    return list(vistos.values()), errores, avisos
+
+
+GRUPOS_INICIALES = ["Competitivo", "Precompetitivo", "Formativo", "Elite", "Master"]
+
+
+def _texto_limpio(valor):
+    if valor is None:
+        return ""
+    try:
+        if pd.isna(valor):
+            return ""
+    except TypeError:
+        pass
+    texto = str(valor).strip()
+    return "" if texto.lower() in ("none", "nan") else texto
+
+
+def texto_observacion_guardado(motivo, detalle):
+    """La nota libre manda. Si solo había un motivo antiguo, se muestra ese texto."""
+    detalle = _texto_limpio(detalle)
+    if detalle:
+        return detalle
+    motivo = _texto_limpio(motivo)
+    if motivo in ("", "—", "Otro"):
+        return ""
+    return motivo
+
+
+def marca_inicial(estado, motivo, detalle):
+    """Una fila ya guardada vuelve como completa, parcial o ausencia, y su nota."""
+    texto = texto_observacion_guardado(motivo, detalle)
+    estado = str(estado or "").strip()
+    if estado == "Parcial" or (estado in ("Presente", "Completa") and texto):
+        return "parcial", texto
+    if estado in ("Presente", "Completa"):
+        return "completa", ""
+    if estado == "Ausente":
+        return "ausente", ""
+    return "", ""
+
+
+def marcar_asistencia_exclusiva(prefijo, elegida):
+    """Si se marca una casilla, las otras dos de esa fila quedan vacías."""
+    if not st.session_state.get(f"{prefijo}_{elegida}"):
+        return
+    for marca in ("completa", "parcial", "ausente"):
+        if marca != elegida:
+            st.session_state[f"{prefijo}_{marca}"] = False
+    if elegida != "parcial":
+        st.session_state[f"{prefijo}_nota"] = ""
+
+
+def filas_asistencia_para_guardar(df, fecha):
+    """Arma las filas a guardar. Si hay errores, no devuelve registros."""
+    errores = []
+    recs = []
+    for _, row in df.iterrows():
+        nombre = _texto_limpio(row.get("nombre")) or "Nadador"
+        marcas = [
+            etiqueta
+            for campo, etiqueta in (
+                ("completa", "Completa"),
+                ("parcial", "Parcial"),
+                ("ausente", "Ausente"),
+            )
+            if bool(row.get(campo))
+        ]
+        if len(marcas) != 1:
+            errores.append(f"{nombre}: marca una sola opción, completa, parcial o ausencia.")
+            continue
+        estado = marcas[0]
+        nota = _texto_limpio(row.get("observacion"))
+        if estado != "Parcial":
+            nota = ""
+        elif not nota:
+            errores.append(f"{nombre}: escribe la observación de la asistencia parcial.")
+            continue
+        id_nad = _anio_entero(row.get("id_nadador"))
+        if id_nad is None:
+            continue
+        recs.append({
+            "id_nadador": id_nad,
+            "fecha": fecha,
+            "estado": estado,
+            "motivo": None,
+            "observacion": nota or None,
+        })
+    if errores:
+        return [], errores
+    return recs, []
+
+
+def _resumen_asistencia(recs, fecha):
+    completas = sum(1 for r in recs if r["estado"] == "Completa")
+    parciales = sum(1 for r in recs if r["estado"] == "Parcial")
+    ausentes = sum(1 for r in recs if r["estado"] == "Ausente")
+    return (
+        f"Asistencia del {fecha.strftime('%d-%m-%Y')}: "
+        f"{completas} completa(s), {parciales} parcial(es), {ausentes} ausente(s)."
+    )
+
+
+def parse_fecha_nacimiento(valor):
+    """Acepta DD/MM/AAAA. Devuelve date, None si está vacío, o 'invalid'."""
+    texto = _texto_limpio(valor)
+    if not texto:
+        return None
+    if hasattr(valor, "year") and hasattr(valor, "month") and hasattr(valor, "day"):
+        try:
+            return datetime(valor.year, valor.month, valor.day).date()
+        except (TypeError, ValueError):
+            return "invalid"
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(texto[:10], fmt).date()
+        except ValueError:
+            continue
+    return "invalid"
+
+
+def valores_calculados_de_nacimiento(valor, anio_temporada=None):
+    """Edad al 31 de diciembre y categoría FECHIDA. None si la fecha no está completa."""
+    fecha = parse_fecha_nacimiento(valor)
+    if not fecha or fecha == "invalid":
+        return None, None
+    temporada = int(anio_temporada or anio_temporada_actual())
+    edad = temporada - fecha.year
+    if edad < 0:
+        return None, None
+    return edad, categoria_por_anio_nacimiento(fecha.year, temporada)
+
+
+def con_edad_y_categoria(df):
+    """Completa edad y categoría a partir de la fecha. Sin fecha válida, ambas quedan vacías."""
+    df = df.copy()
+    edades = []
+    categorias = []
+    for _, row in df.iterrows():
+        fecha = parse_fecha_nacimiento(row.get("fecha_nacimiento"))
+        if fecha and fecha != "invalid":
+            edad, cat = valores_calculados_de_nacimiento(fecha)
+            edades.append("" if edad is None else str(int(edad)))
+            categorias.append(cat or "")
+        else:
+            edades.append("")
+            categorias.append("")
+    df["edad"] = edades
+    df["categoria"] = categorias
+    return df
+
+
+def _proyectar_ediciones_perfiles(df, estado):
+    """Aplica lo que ya se escribió en el editor para recalcular edad y categoría."""
+    if not isinstance(estado, dict):
+        return df
+    out = df.copy()
+    for idx, cambios in (estado.get("edited_rows") or {}).items():
+        if isinstance(cambios, dict):
+            cambios.pop("edad", None)
+            cambios.pop("categoria", None)
+        i = int(idx)
+        if i < 0 or i >= len(out):
+            continue
+        for col, valor in cambios.items():
+            if col in out.columns and col not in ("edad", "categoria", "id_nadador"):
+                out.iat[i, out.columns.get_loc(col)] = valor
+    for fila in estado.get("added_rows") or []:
+        edad, cat = valores_calculados_de_nacimiento(fila.get("fecha_nacimiento"))
+        fila["edad"] = "" if edad is None else str(edad)
+        fila["categoria"] = cat or ""
+    return out
+
+
+COLOR_CELDA_EDITABLE = "#ffffff"
+COLOR_CELDA_BLOQUEADA = "#d9dde3"
+
+
+def presentacion_perfiles(df, solo_lectura):
+    """Fondo blanco en lo editable y gris en edad, categoría y el resto bloqueado."""
+    bloqueadas = set(df.columns) if solo_lectura else {"edad", "categoria"}
+
+    def pintar(columna):
+        color = COLOR_CELDA_BLOQUEADA if columna.name in bloqueadas else COLOR_CELDA_EDITABLE
+        return [f"background-color: {color}"] * len(columna)
+
+    return df.style.apply(pintar, axis=0)
+
+
+def es_cumpleanos(fecha_nacimiento, fecha_clase):
+    """El día y el mes de la clase coinciden con el nacimiento. El año no importa."""
+    fecha = parse_fecha_nacimiento(fecha_nacimiento)
+    if not fecha or fecha == "invalid" or fecha_clase is None:
+        return False
+    return fecha.month == fecha_clase.month and fecha.day == fecha_clase.day
+
+
+def nombre_en_lista(nombre, fecha_nacimiento, fecha_clase):
+    nombre = _texto_limpio(nombre) or "Nadador"
+    if es_cumpleanos(fecha_nacimiento, fecha_clase):
+        return f"{nombre} 🎂🥳"
+    return nombre
+
+
+def formatear_fecha_nacimiento(valor):
+    fecha = parse_fecha_nacimiento(valor)
+    if not fecha or fecha == "invalid":
+        return ""
+    return fecha.strftime("%d/%m/%Y")
+
+
+def catalogo_grupos(grupos_df, nadadores_df):
+    """La tabla de grupos manda. Si todavía no existe, se usan los grupos iniciales y los de las fichas."""
+    nombres = []
+    tiene_catalogo = False
+    if grupos_df is not None and not getattr(grupos_df, "empty", True) and "nombre" in grupos_df.columns:
+        for nombre in grupos_df["nombre"].tolist():
+            nombre = _texto_limpio(nombre)
+            if nombre and nombre not in nombres:
+                nombres.append(nombre)
+                tiene_catalogo = True
+    if not tiene_catalogo:
+        nombres.extend(GRUPOS_INICIALES)
+    if nadadores_df is not None and not getattr(nadadores_df, "empty", True) and "grupo" in nadadores_df.columns:
+        for nombre in nadadores_df["grupo"].dropna().tolist():
+            nombre = _texto_limpio(nombre)
+            if nombre and nombre not in nombres:
+                nombres.append(nombre)
+    return nombres
+
+
+def cambios_de_grupos(filas):
+    """Separa renombres y grupos nuevos. Un nombre vacío o repetido detiene el guardado."""
+    errores = []
+    renombres = []
+    agregados = []
+    vistos = []
+    for fila in filas:
+        anterior = _texto_limpio(fila.get("anterior"))
+        nombre = _texto_limpio(fila.get("nombre"))
+        if not nombre:
+            if anterior:
+                errores.append(f"El grupo «{anterior}» no puede quedar sin nombre.")
+            continue
+        if nombre in vistos:
+            errores.append(f"El nombre «{nombre}» está repetido.")
+            continue
+        vistos.append(nombre)
+        if not anterior:
+            agregados.append(nombre)
+        elif nombre != anterior:
+            renombres.append((anterior, nombre))
+    if errores:
+        return [], [], errores
+    return renombres, agregados, errores
+
+
+def lista_grupos():
+    return catalogo_grupos(
+        st.session_state.get("grupos_df"),
+        st.session_state.get("nadadores_df"),
+    )
+
+
+def es_nadador_activo(valor):
+    """Sin la columna, o con el valor vacío, el nadador sigue visible."""
+    if valor is None:
+        return True
+    try:
+        if pd.isna(valor):
+            return True
+    except TypeError:
+        pass
+    if isinstance(valor, str):
+        return valor.strip().lower() not in ("false", "0", "no", "inactivo")
+    return bool(valor)
+
+
+def filtrar_nadadores_activos(df):
+    if df is None or df.empty or "activo" not in df.columns:
+        return df
+    return df.loc[df["activo"].map(es_nadador_activo)].copy()
+
+
+def _secreto_sesion():
+    """La firma usa la llave del servidor. No va en el repositorio ni en la cookie."""
+    try:
+        if "supabase" in st.secrets:
+            key = st.secrets["supabase"].get("SUPABASE_KEY", "")
+        else:
+            key = st.secrets.get("SUPABASE_KEY", "")
+        if key:
+            return str(key)
+    except Exception:
+        pass
+    return "acuatico-local-demo"
+
+
+def firmar_sesion(id_usuario, secreto, ahora=None, dias=14):
+    expira = int((ahora if ahora is not None else time.time()) + dias * 86400)
+    mensaje = f"{int(id_usuario)}.{expira}"
+    firma = hmac.new(secreto.encode(), mensaje.encode(), hashlib.sha256).hexdigest()
+    return f"{mensaje}.{firma}"
+
+
+def leer_sesion(token, secreto, ahora=None):
+    partes = str(token or "").split(".")
+    if len(partes) != 3:
+        return None
+    mensaje = f"{partes[0]}.{partes[1]}"
+    firma = hmac.new(secreto.encode(), mensaje.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(firma, partes[2]):
+        return None
+    try:
+        expira = int(partes[1])
+        uid = int(partes[0])
+    except ValueError:
+        return None
+    if expira < int(ahora if ahora is not None else time.time()):
+        return None
+    return uid
+
+
+def sincronizar_cookie_sesion(token="", borrar=False):
+    import streamlit.components.v1 as components
+    max_age = 0 if borrar else 14 * 24 * 3600
+    components.html(
+        f"""<script>
+        try {{
+          window.parent.document.cookie = "acuatico_sesion={token}; path=/; max-age={max_age}; SameSite=Lax";
+        }} catch (e) {{}}
+        </script>""",
+        height=0,
+        width=0,
+    )
+
+
+def restaurar_usuario(token, usuarios_df):
+    uid = leer_sesion(token, _secreto_sesion())
+    if uid is None or usuarios_df is None or usuarios_df.empty or "id_usuario" not in usuarios_df.columns:
+        return None
+    ids = usuarios_df["id_usuario"].map(_anio_entero)
+    match = usuarios_df.loc[ids == uid]
+    if match.empty:
+        return None
+    user = match.iloc[0]
+    if not (bool(user.get("validado")) or user.get("rol") == "Master"):
+        return None
+    return user
+
+
 # --- Configuración de la página ---
 st.set_page_config(
     page_title="Club de Natación Acuático Valdivia",
@@ -66,24 +622,95 @@ hide_streamlit_style = """
     .st-emotion-cache-18ni7ap {
         padding-top: 1rem;
     }
-    /* Estilos para centrar y mejorar el menú de navegación */
-    div.row-widget.stRadio > div {
-        flex-direction: row;
-        justify-content: center;
-        gap: 2rem;
+    /* Solapas tipo carpeta: la abierta queda levantada y con sombra */
+    .block-container {
+        padding-bottom: 4.5rem;
     }
-    div.row-widget.stRadio > div > label {
-        border: 2px solid #007bff;
-        padding: 5px 15px;
-        border-radius: 20px;
-        background-color: #f0f2f6;
+    p, .stCaption, [data-testid="stMarkdown"] {
+        overflow-wrap: break-word;
     }
-    div.row-widget.stRadio > div > label:hover {
-        background-color: #e1e5eb;
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 6px;
+        border-bottom: 2px solid #c5d4e8;
+        padding-top: 8px;
+        overflow-x: auto;
+        flex-wrap: nowrap;
     }
-    /* Ocultar el punto del radio button */
-    div.row-widget.stRadio > div > label > div::before {
-        display: none;
+    .stTabs [data-baseweb="tab"] {
+        margin-top: 8px;
+        border-radius: 14px 14px 0 0 !important;
+        border: 1px solid #d5deea !important;
+        border-bottom: none !important;
+        background: #e7eef6 !important;
+        padding: 0.55rem 1rem !important;
+        color: #3d4d63 !important;
+        box-shadow: none !important;
+        white-space: nowrap;
+        flex: 0 0 auto;
+    }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        margin-top: 0;
+        background: #ffffff !important;
+        color: #0b4f9c !important;
+        font-weight: 700 !important;
+        border-color: #b7cbe4 !important;
+        box-shadow: 0 -7px 16px rgba(20, 50, 90, 0.18), 5px 0 10px rgba(20, 50, 90, 0.06) !important;
+        position: relative;
+        z-index: 2;
+    }
+    .stTabs [data-baseweb="tab-highlight"] {
+        background-color: transparent !important;
+    }
+    .stTabs [data-baseweb="tab-panel"] {
+        background: #ffffff;
+        border: 1px solid #d5deea;
+        border-top: none;
+        border-radius: 0 0 12px 12px;
+        padding-top: 0.6rem;
+        box-shadow: 0 10px 18px rgba(20, 50, 90, 0.07);
+    }
+    @media (min-width: 761px) {
+        [class*="st-key-asist-fila"] [data-testid="stCheckbox"] label > div:last-child {
+            display: none;
+        }
+    }
+    @media (max-width: 760px) {
+        .block-container {
+            padding-left: 0.7rem !important;
+            padding-right: 0.7rem !important;
+        }
+        h1 { font-size: 1.45rem !important; }
+        h2 { font-size: 1.2rem !important; }
+        .stTabs [data-baseweb="tab"] {
+            padding: 0.4rem 0.55rem !important;
+            font-size: 0.78rem !important;
+        }
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 0.35rem 0.4rem !important;
+        }
+        [data-testid="stColumn"] {
+            flex: 1 1 150px !important;
+            width: auto !important;
+            min-width: min(100%, 150px) !important;
+        }
+        .st-key-asist-cabecera { display: none !important; }
+        [class*="st-key-asist-fila"] [data-testid="stHorizontalBlock"] {
+            align-items: end;
+        }
+        [class*="st-key-asist-fila"] [data-testid="stColumn"]:nth-child(1),
+        [class*="st-key-asist-fila"] [data-testid="stColumn"]:nth-child(5) {
+            flex: 1 1 100% !important;
+            width: 100% !important;
+            min-width: 100% !important;
+        }
+        [class*="st-key-asist-fila"] [data-testid="stColumn"]:nth-child(2),
+        [class*="st-key-asist-fila"] [data-testid="stColumn"]:nth-child(3),
+        [class*="st-key-asist-fila"] [data-testid="stColumn"]:nth-child(4) {
+            flex: 1 1 30% !important;
+            width: 30% !important;
+            min-width: 0 !important;
+        }
     }
     .footer {
         position: fixed;
@@ -158,7 +785,7 @@ def cargar_datos():
             mar = supabase.table("marcas_minimas").select("*").execute().data
 
             u_df = pd.DataFrame(usu) if usu else pd.DataFrame(columns=['id', 'nombre', 'email', 'rol', 'validado', 'grupos_asignados', 'clave'])
-            n_df = pd.DataFrame(nad) if nad else pd.DataFrame(columns=['id', 'nombre', 'grupo', 'categoria', 'sexo'])
+            n_df = pd.DataFrame(nad) if nad else pd.DataFrame(columns=['id', 'nombre', 'grupo', 'categoria', 'sexo', 'anio_nacimiento'])
             t_df = pd.DataFrame(tie) if tie else pd.DataFrame(columns=['id', 'id_nadador', 'fecha', 'lugar', 'estilo', 'tiempo_formateado', 'segundos_totales', 'tipo_piscina'])
             m_df = pd.DataFrame(mar) if mar else pd.DataFrame(columns=['categoria', 'estilo', 'sexo', 'segundos'])
 
@@ -168,6 +795,7 @@ def cargar_datos():
             res_df   = _safe("resultados_test", _cols_res)
             dfis_df  = _safe("datos_fisicos", _cols_dfis)
             tent_df  = _safe("tiempos_entrenamiento", _cols_tent)
+            grupos_df = _safe("grupos", ["id", "nombre"])
 
             if not u_df.empty: u_df.rename(columns={'id': 'id_usuario'}, inplace=True)
 
@@ -179,6 +807,8 @@ def cargar_datos():
                     n_df = n_df.rename(columns={'id': 'id_nadador'})
                 elif 'id_nadador' not in n_df.columns:
                     n_df.insert(0, 'id_nadador', range(1, len(n_df) + 1))
+                sincronizar_categorias_calculadas(supabase, n_df)
+                n_df = aplicar_categoria_en_memoria(n_df)
 
             # Normalizar columnas de tiempos
             if not t_df.empty:
@@ -198,17 +828,17 @@ def cargar_datos():
                     m_df.rename(columns={'segundos_objetivo': 'segundos'}, inplace=True)
 
             if not u_df.empty:
-                return n_df, t_df, u_df, m_df, inc_df, tst_df, res_df, dfis_df, tent_df
+                return n_df, t_df, u_df, m_df, inc_df, tst_df, res_df, dfis_df, tent_df, grupos_df
         except Exception as e:
             st.sidebar.warning(f"Error conectando a BD: {e}. Usando modo local.")
 
     # --- FALLBACK DE PROTOTIPO ---
-    nadadores_df = pd.DataFrame([
-        {'id_nadador': 1, 'nombre': 'Ana', 'grupo': 'Competitivo', 'categoria': 'Infantil B1', 'sexo': 'Femenino'},
-        {'id_nadador': 2, 'nombre': 'Luis', 'grupo': 'Competitivo', 'categoria': 'Infantil A', 'sexo': 'Masculino'},
-        {'id_nadador': 3, 'nombre': 'Carla', 'grupo': 'Precompetitivo', 'categoria': 'Juvenil A1', 'sexo': 'Femenino'},
-        {'id_nadador': 4, 'nombre': 'Pedro', 'grupo': 'Elite', 'categoria': 'Mayores', 'sexo': 'Masculino'},
-    ])
+    nadadores_df = aplicar_categoria_en_memoria(pd.DataFrame([
+        {'id_nadador': 1, 'nombre': 'Ana', 'grupo': 'Competitivo', 'categoria': 'Infantil B1', 'sexo': 'Femenino', 'anio_nacimiento': 2014, 'fecha_nacimiento': '2014-03-15', 'activo': True},
+        {'id_nadador': 2, 'nombre': 'Luis', 'grupo': 'Competitivo', 'categoria': 'Infantil A', 'sexo': 'Masculino', 'anio_nacimiento': 2015, 'activo': True},
+        {'id_nadador': 3, 'nombre': 'Carla', 'grupo': 'Precompetitivo', 'categoria': 'Juvenil A1', 'sexo': 'Femenino', 'anio_nacimiento': 2012, 'activo': True},
+        {'id_nadador': 4, 'nombre': 'Pedro', 'grupo': 'Elite', 'categoria': 'Mayores', 'sexo': 'Masculino', 'anio_nacimiento': None, 'activo': False},
+    ]))
     tiempos_df = pd.DataFrame([
         {'id_nadador': 1, 'fecha': '2023-10-15', 'lugar': 'Piscina Municipal', 'estilo': '50m Libre', 'tiempo_formateado': '00:28,50', 'segundos_totales': 28.5, 'tipo_piscina': 'Piscina Corta (25m)'},
         {'id_nadador': 1, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '50m Libre', 'tiempo_formateado': '00:27,90', 'segundos_totales': 27.9, 'tipo_piscina': 'Piscina Larga (50m)'},
@@ -216,12 +846,12 @@ def cargar_datos():
         {'id_nadador': 4, 'fecha': '2023-11-20', 'lugar': 'Competencia Regional', 'estilo': '200m Combinado', 'tiempo_formateado': '02:10,80', 'segundos_totales': 130.8, 'tipo_piscina': 'Piscina Larga (50m)'},
     ])
     usuarios_df = pd.DataFrame([
-        {'id_usuario': 999, 'nombre': 'Super Master', 'rol': 'Master', 'grupos_asignados': [], 'email': 'master@club.cl', 'validado': True, 'clave': 'admin123'},
-        {'id_usuario': 888, 'nombre': 'Junta Directiva', 'rol': 'Directiva', 'grupos_asignados': [], 'email': 'directiva@club.cl', 'validado': True, 'clave': '1234'},
-        {'id_usuario': 101, 'nombre': 'Entrenador Alex', 'rol': 'Entrenador', 'grupos_asignados': ['Elite','Competitivo', 'Precompetitivo'], 'email': 'alex@club.cl', 'validado': True, 'clave': '1234'},
-        {'id_usuario': 1, 'nombre': 'Ana', 'rol': 'Nadador', 'grupos_asignados': [], 'email': 'ana@club.cl', 'validado': True, 'clave': '1234'},
-        {'id_usuario': 4, 'nombre': 'Pedro', 'rol': 'Nadador', 'grupos_asignados': [], 'email': 'pedro@club.cl', 'validado': True, 'clave': '1234'},
-        {'id_usuario': 99, 'nombre': 'Usuario Nuevo', 'rol': 'Pendiente', 'grupos_asignados': [], 'email': 'nuevo@gmail.com', 'validado': False, 'clave': '1234'},
+        {'id_usuario': 999, 'nombre': 'Super Master', 'rol': 'Master', 'grupos_asignados': [], 'email': 'master@club.cl', 'validado': True, 'clave': 'admin123', 'id_nadador': None},
+        {'id_usuario': 888, 'nombre': 'Junta Directiva', 'rol': 'Directiva', 'grupos_asignados': [], 'email': 'directiva@club.cl', 'validado': True, 'clave': '1234', 'id_nadador': None},
+        {'id_usuario': 101, 'nombre': 'Entrenador Alex', 'rol': 'Entrenador', 'grupos_asignados': ['Elite','Competitivo', 'Precompetitivo'], 'email': 'alex@club.cl', 'validado': True, 'clave': '1234', 'id_nadador': None},
+        {'id_usuario': 1, 'nombre': 'Ana', 'rol': 'Nadador', 'grupos_asignados': [], 'email': 'ana@club.cl', 'validado': True, 'clave': '1234', 'id_nadador': 1},
+        {'id_usuario': 4, 'nombre': 'Pedro', 'rol': 'Nadador', 'grupos_asignados': [], 'email': 'pedro@club.cl', 'validado': True, 'clave': '1234', 'id_nadador': 4},
+        {'id_usuario': 99, 'nombre': 'Usuario Nuevo', 'rol': 'Pendiente', 'grupos_asignados': [], 'email': 'nuevo@gmail.com', 'validado': False, 'clave': '1234', 'id_nadador': None},
     ])
     marcas_minimas_df = pd.DataFrame([
         {'categoria': 'Infantil A', 'estilo': '50m Libre', 'sexo': 'Femenino', 'segundos': 32.0},
@@ -237,7 +867,8 @@ def cargar_datos():
         nadadores_df, tiempos_df, usuarios_df, marcas_minimas_df,
         pd.DataFrame(columns=_cols_inc), pd.DataFrame(columns=_cols_tst),
         pd.DataFrame(columns=_cols_res), pd.DataFrame(columns=_cols_dfis),
-        pd.DataFrame(columns=_cols_tent)
+        pd.DataFrame(columns=_cols_tent),
+        pd.DataFrame({"id": list(range(1, len(GRUPOS_INICIALES) + 1)), "nombre": GRUPOS_INICIALES}),
     )
 
 # --- Definición de las Páginas como Funciones ---
@@ -252,17 +883,24 @@ def mostrar_dashboard():
             st.header("Dashboard del Entrenador 📋")
             
         user_info = st.session_state.user_info
+        roster = filtrar_nadadores_activos(st.session_state.nadadores_df)
         # Directiva obtiene todos los grupos; Entrenador solo los suyos (o todos si tiene el permiso 'Todos')
-        grupos_asignados = user_info['grupos_asignados'] if st.session_state.user_role == 'Entrenador' else st.session_state.nadadores_df['grupo'].unique().tolist()
+        grupos_asignados = user_info['grupos_asignados'] if st.session_state.user_role == 'Entrenador' else roster['grupo'].dropna().unique().tolist()
         if st.session_state.user_role == 'Entrenador' and ('Todos' in user_info['grupos_asignados'] or not user_info['grupos_asignados']):
-            grupos_asignados = st.session_state.nadadores_df['grupo'].unique().tolist()
+            grupos_asignados = roster['grupo'].dropna().unique().tolist()
+        grupos_asignados = [g for g in grupos_asignados if pd.notna(g) and str(g).strip()]
         
         # Opciones de resumen
-        grupo_seleccionado = st.selectbox("Selecciona un grupo para ver el resumen masivo:", ["Todos"] + grupos_asignados)
-        if grupo_seleccionado == "Todos":
-            nadadores_del_grupo = st.session_state.nadadores_df[st.session_state.nadadores_df['grupo'].isin(grupos_asignados)]
+        if not grupos_asignados:
+            st.info("No hay nadadores activos para mostrar. Quienes dejaron de venir siguen en Perfiles, con la casilla Activo desmarcada.")
+            nadadores_del_grupo = roster.iloc[0:0]
+            grupo_seleccionado = None
         else:
-            nadadores_del_grupo = st.session_state.nadadores_df[st.session_state.nadadores_df['grupo'] == grupo_seleccionado]
+            grupo_seleccionado = st.selectbox("Selecciona un grupo para ver el resumen masivo:", ["Todos"] + grupos_asignados)
+            if grupo_seleccionado == "Todos":
+                nadadores_del_grupo = roster[roster['grupo'].isin(grupos_asignados)]
+            else:
+                nadadores_del_grupo = roster[roster['grupo'] == grupo_seleccionado]
             
         st.subheader("Resumen de Marcas del Grupo")
         resumen_data = []
@@ -525,18 +1163,25 @@ def mostrar_dashboard():
     elif st.session_state.user_role == 'Nadador':
         st.header("Mi Progreso Personal")
         user_info = st.session_state.user_info
-        id_nadador = user_info['id_usuario']
-        tiempos_nadador = st.session_state.tiempos_df[st.session_state.tiempos_df['id_nadador'] == id_nadador]
-        
-        st.subheader("Mis Tiempos Registrados")
-        if not tiempos_nadador.empty:
-            _disp = tiempos_nadador.copy()
-            _disp['Tiempo'] = _disp.apply(formatear_tiempo_con_icono, axis=1)
-            st.dataframe(_disp[['fecha', 'lugar', 'estilo', 'Tiempo']], use_container_width=True)
+        id_nadador = _anio_entero(user_info.get("id_nadador"))
+        ficha = st.session_state.nadadores_df.iloc[0:0]
+        if id_nadador is not None and "id_nadador" in st.session_state.nadadores_df.columns:
+            ficha = st.session_state.nadadores_df[st.session_state.nadadores_df["id_nadador"].map(_anio_entero) == id_nadador]
+        if id_nadador is None or ficha.empty:
+            st.warning("Tu cuenta todavía no está vinculada a un nadador. El administrador debe asignarte la ficha en Admin Usuarios.")
         else:
-            st.warning("Aún no tienes tiempos registrados.")
-        st.subheader("Mi Gráfica de Progreso")
-        st.info("La gráfica de telaraña se mostrará aquí.")
+            yo = ficha.iloc[0]
+            st.subheader(f"{yo.get('nombre')} · {yo.get('categoria', '')}")
+            tiempos_nadador = st.session_state.tiempos_df[st.session_state.tiempos_df["id_nadador"].map(_anio_entero) == id_nadador] if "id_nadador" in st.session_state.tiempos_df.columns else st.session_state.tiempos_df.iloc[0:0]
+            st.subheader("Mis Tiempos Registrados")
+            if not tiempos_nadador.empty:
+                _disp = tiempos_nadador.copy()
+                _disp['Tiempo'] = _disp.apply(formatear_tiempo_con_icono, axis=1)
+                st.dataframe(_disp[['fecha', 'lugar', 'estilo', 'Tiempo']], use_container_width=True)
+            else:
+                st.warning("Aún no tienes tiempos registrados.")
+            st.subheader("Mi Gráfica de Progreso")
+            st.info("La gráfica de telaraña se mostrará aquí.")
     else:
         st.error("Rol no reconocido o cuenta pendiente.")
 
@@ -554,108 +1199,229 @@ def mostrar_asistencia():
         st.info("👁️ **Modo vista** — solo los entrenadores pueden registrar la asistencia.")
 
     user_info = st.session_state.user_info
+    roster = filtrar_nadadores_activos(st.session_state.nadadores_df)
     grupos_asignados = user_info.get('grupos_asignados', [])
     if solo_lectura or 'Todos' in grupos_asignados or not grupos_asignados:
-        grupos_asignados = st.session_state.nadadores_df['grupo'].unique().tolist()
+        grupos_asignados = roster['grupo'].dropna().unique().tolist()
+    grupos_asignados = [g for g in grupos_asignados if pd.notna(g) and str(g).strip()]
 
-    col1, col2 = st.columns(2)
-    with col1:
-        grupo_seleccionado = st.selectbox("Grupo:", grupos_asignados)
-    with col2:
-        fecha_seleccionada = st.date_input("Fecha de la clase:", datetime.today())
+    if not grupos_asignados:
+        st.info("No hay nadadores activos en este grupo.")
+        nadadores_del_grupo = roster.iloc[0:0]
+        grupo_seleccionado = ""
+        fecha_seleccionada = datetime.today()
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            grupo_seleccionado = st.selectbox("Grupo:", grupos_asignados)
+        with col2:
+            fecha_seleccionada = st.date_input("Fecha de la clase:", datetime.today())
+        nadadores_del_grupo = roster[roster['grupo'] == grupo_seleccionado]
+    st.caption("Marca una sola casilla por nadador: completa, parcial o ausencia. El texto de observación se habilita solo en parcial.")
 
-    nadadores_del_grupo = st.session_state.nadadores_df[st.session_state.nadadores_df['grupo'] == grupo_seleccionado]
-    st.subheader(f"Lista de nadadores para el grupo: {grupo_seleccionado}")
+    fecha_str = fecha_seleccionada.strftime('%Y-%m-%d')
+    registros = {}
+    supabase = init_connection()
+    lectura_ok = supabase is None
+    if supabase:
+        try:
+            guardadas = supabase.table("asistencias").select("*").eq("fecha", fecha_str).execute().data or []
+            for row in guardadas:
+                id_nad = _anio_entero(row.get("id_nadador"))
+                if id_nad is not None:
+                    registros[id_nad] = row
+            lectura_ok = True
+        except Exception as e:
+            st.warning(f"No se pudo leer la asistencia ya guardada: {e}")
 
-    asistencia_df = nadadores_del_grupo[['id_nadador', 'nombre']].copy()
-    asistencia_df['presente'] = False
+    filas = []
+    for _, nad in nadadores_del_grupo.iterrows():
+        id_nad = _anio_entero(nad.get("id_nadador"))
+        previo = registros.get(id_nad, {})
+        marca, nota = marca_inicial(
+            previo.get("estado"), previo.get("motivo"), previo.get("observacion")
+        )
+        filas.append({
+            "id_nadador": id_nad,
+            "nombre": nombre_en_lista(nad.get("nombre"), nad.get("fecha_nacimiento"), fecha_seleccionada),
+            "marca": marca,
+            "observacion": nota,
+        })
 
-    edited_df = st.data_editor(
-        asistencia_df,
-        column_config={
-            "id_nadador": None,
-            "nombre": st.column_config.TextColumn("Nadador", disabled=True),
-            "presente": st.column_config.CheckboxColumn("¿Presente?", default=False)
-        },
-        use_container_width=True,
-        hide_index=True,
-        disabled=solo_lectura
-    )
+    anchos_asistencia = [2.3, 0.9, 0.9, 0.95, 2.8]
+    with st.container(key="asist-cabecera"):
+        cabecera = st.columns(anchos_asistencia, vertical_alignment="center")
+        cabecera[0].markdown("**Nadador**")
+        cabecera[1].markdown("**Completa**")
+        cabecera[2].markdown("**Parcial**")
+        cabecera[3].markdown("**Ausencia**")
+        cabecera[4].markdown("**Observación**")
+
+    editadas = []
+    for fila in filas:
+        id_nad = fila["id_nadador"]
+        prefijo = f"asist_{grupo_seleccionado}_{fecha_str}_{id_nad}"
+        if f"{prefijo}_completa" not in st.session_state:
+            st.session_state[f"{prefijo}_completa"] = fila["marca"] == "completa"
+            st.session_state[f"{prefijo}_parcial"] = fila["marca"] == "parcial"
+            st.session_state[f"{prefijo}_ausente"] = fila["marca"] == "ausente"
+        if f"{prefijo}_nota" not in st.session_state:
+            st.session_state[f"{prefijo}_nota"] = fila["observacion"]
+        with st.container(key=f"asist-fila-{grupo_seleccionado}-{id_nad}"):
+            columnas = st.columns(anchos_asistencia, vertical_alignment="center")
+            columnas[0].write(fila["nombre"])
+            completa = columnas[1].checkbox(
+                "Completa",
+                key=f"{prefijo}_completa",
+                disabled=solo_lectura,
+                on_change=None if solo_lectura else marcar_asistencia_exclusiva,
+                args=(prefijo, "completa"),
+            )
+            parcial = columnas[2].checkbox(
+                "Parcial",
+                key=f"{prefijo}_parcial",
+                disabled=solo_lectura,
+                on_change=None if solo_lectura else marcar_asistencia_exclusiva,
+                args=(prefijo, "parcial"),
+            )
+            ausente = columnas[3].checkbox(
+                "Ausencia",
+                key=f"{prefijo}_ausente",
+                disabled=solo_lectura,
+                on_change=None if solo_lectura else marcar_asistencia_exclusiva,
+                args=(prefijo, "ausente"),
+            )
+            observacion = columnas[4].text_input(
+                "Observación",
+                key=f"{prefijo}_nota",
+                label_visibility="collapsed",
+                disabled=solo_lectura or not parcial,
+                placeholder="Ej.: llegó tarde, se retiró antes",
+            )
+        editadas.append({
+            "id_nadador": id_nad,
+            "nombre": fila["nombre"],
+            "completa": completa,
+            "parcial": parcial,
+            "ausente": ausente,
+            "observacion": observacion,
+        })
+    edited_df = pd.DataFrame(editadas)
 
     if not solo_lectura:
         if st.button("Guardar Asistencia", type="primary"):
-            presentes = edited_df[edited_df['presente'] == True]
-            supabase = init_connection()
-            if supabase:
-                fecha_str = fecha_seleccionada.strftime('%Y-%m-%d')
-                data_to_insert = [{"id_nadador": int(row['id_nadador']), "fecha": fecha_str, "estado": "Presente"} for _, row in presentes.iterrows()]
-                if data_to_insert:
-                    try:
-                        supabase.table("asistencias").upsert(data_to_insert).execute()
-                    except Exception as e:
+            recs, errores = filas_asistencia_para_guardar(edited_df, fecha_str)
+            if not lectura_ok:
+                st.error("No se guardó nada: primero hay que poder leer la asistencia de ese día, para no pisar la que ya existe.")
+            elif errores:
+                st.error("No se guardó la lista. " + " ".join(errores))
+            elif recs and supabase:
+                try:
+                    supabase.table("asistencias").upsert(recs, on_conflict="id_nadador,fecha").execute()
+                    st.success(_resumen_asistencia(recs, fecha_seleccionada))
+                except Exception as e:
+                    if "motivo" in str(e) or "observacion" in str(e):
+                        reducidos = [
+                            {k: v for k, v in r.items() if k not in ("motivo", "observacion")}
+                            for r in recs
+                        ]
+                        try:
+                            supabase.table("asistencias").upsert(
+                                reducidos, on_conflict="id_nadador,fecha"
+                            ).execute()
+                            st.warning(
+                                "La asistencia quedó guardada, pero la base todavía no tiene motivo ni detalle. "
+                                "Ejecuta migracion_asistencia.sql en Supabase para que esas observaciones se conserven."
+                            )
+                        except Exception as e2:
+                            st.error(f"Error BD al guardar asistencias: {e2}")
+                    else:
                         st.error(f"Error BD al guardar asistencias: {e}")
-            st.success(f"Asistencia guardada para el {fecha_seleccionada.strftime('%d-%m-%Y')}. {len(presentes)} nadador(es) presente(s).")
+            elif recs:
+                st.success(_resumen_asistencia(recs, fecha_seleccionada) + " (modo local)")
+            else:
+                st.info("No hay nadadores en este grupo para guardar.")
 
-    # --- Sección de Incidencias de Clase ---
     st.markdown("---")
-    st.subheader("📝 Incidencias de la Clase")
+    st.subheader("📝 Incidencia de la clase")
+    st.caption("Texto libre del entrenador: una pelea, un altercado, un derrumbe o lo que haya pasado en la clase.")
 
     inc_df = st.session_state.get('incidencias_df', pd.DataFrame())
-    # Filtrar incidencias de la fecha y grupo seleccionados
-    if not inc_df.empty and 'fecha' in inc_df.columns:
+    nota_id = None
+    nota_texto = ""
+    otras = []
+    if not inc_df.empty and 'fecha' in inc_df.columns and grupo_seleccionado:
         fecha_str_inc = fecha_seleccionada.strftime('%Y-%m-%d')
-        inc_hoy = inc_df[
-            (inc_df['fecha'].astype(str) == fecha_str_inc) &
-            (inc_df['grupo'].astype(str) == grupo_seleccionado)
-        ] if 'grupo' in inc_df.columns else inc_df[inc_df['fecha'].astype(str) == fecha_str_inc]
-        if not inc_hoy.empty:
-            for _, row in inc_hoy.iterrows():
-                tipo_icon = {"Nadador Individual": "👤", "Clase Completa": "🚨", "Test Federación": "🏁"}.get(str(row.get('tipo','')), "📌")
-                st.info(f"{tipo_icon} **{row.get('tipo','')}** — {row.get('descripcion','')}")
+        inc_hoy = inc_df[inc_df['fecha'].astype(str) == fecha_str_inc]
+        if 'grupo' in inc_hoy.columns:
+            inc_hoy = inc_hoy[inc_hoy['grupo'].astype(str) == str(grupo_seleccionado)]
+        for _, row in inc_hoy.iterrows():
+            if str(row.get("tipo") or "") == "Nota de clase":
+                nota_id = row.get("id")
+                nota_texto = _texto_limpio(row.get("descripcion"))
+            else:
+                otras.append(_texto_limpio(row.get("descripcion")))
+    for texto_previo in otras:
+        if texto_previo:
+            st.info(texto_previo)
+
+    incidencia = st.text_area(
+        "Incidencia",
+        value=nota_texto,
+        height=140,
+        disabled=solo_lectura,
+        placeholder="Ej.: Pelea en el camarín. Altercado entre dos nadadores. Derrumbe de un carril.",
+        key=f"incidencia_{grupo_seleccionado}_{fecha_str}",
+        label_visibility="collapsed",
+    )
+    if not solo_lectura and st.button("Guardar incidencia", type="primary"):
+        texto_inc = _texto_limpio(incidencia)
+        if not texto_inc:
+            st.error("Escribe la incidencia antes de guardar.")
         else:
-            st.caption("No hay incidencias registradas para esta clase.")
-    else:
-        st.caption("No hay incidencias registradas aún.")
-
-    if not solo_lectura:
-        with st.expander("➕ Registrar Nueva Incidencia"):
-            with st.form("form_incidencia"):
-                tipo_inc = st.selectbox(
-                    "Tipo de Incidencia:",
-                    ["Nadador Individual", "Clase Completa", "Test Federación"]
-                )
-                nadador_inc = None
-                if tipo_inc == "Nadador Individual":
-                    opciones_nad = nadadores_del_grupo['nombre'].tolist()
-                    nadador_inc_nombre = st.selectbox("Nadador afectado:", opciones_nad)
-                    fila_nad = nadadores_del_grupo[nadadores_del_grupo['nombre'] == nadador_inc_nombre]
-                    nadador_inc = int(fila_nad.iloc[0]['id_nadador']) if not fila_nad.empty else None
-
-                descripcion_inc = st.text_area(
-                    "Descripción:",
-                    placeholder="Describe la incidencia. Ej: El nadador se retiró antes por mareos. / Clase suspendida por corte de luz."
-                )
-                if st.form_submit_button("💾 Guardar Incidencia", type="primary"):
-                    if descripcion_inc.strip():
-                        rec_inc = {
-                            "fecha": fecha_seleccionada.strftime('%Y-%m-%d'),
-                            "grupo": grupo_seleccionado,
-                            "tipo": tipo_inc,
-                            "id_nadador": nadador_inc,
-                            "descripcion": descripcion_inc.strip()
-                        }
-                        supabase = init_connection()
-                        if supabase:
-                            try:
-                                supabase.table("incidencias_clase").insert(rec_inc).execute()
-                                st.success("✅ Incidencia registrada correctamente.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error BD: {e}")
-                        else:
-                            st.success("Modo local: Incidencia guardada (simulado).")
+            rec_inc = {
+                "fecha": fecha_str,
+                "grupo": grupo_seleccionado,
+                "tipo": "Nota de clase",
+                "id_nadador": None,
+                "descripcion": texto_inc,
+            }
+            sb_inc = init_connection()
+            if sb_inc:
+                try:
+                    if nota_id is not None and str(nota_id) not in ("", "nan"):
+                        sb_inc.table("incidencias_clase").update(
+                            {"descripcion": texto_inc}
+                        ).eq("id", int(nota_id)).execute()
                     else:
-                        st.error("La descripción no puede estar vacía.")
+                        sb_inc.table("incidencias_clase").insert(rec_inc).execute()
+                    fresco = sb_inc.table("incidencias_clase").select("*").execute().data
+                    st.session_state.incidencias_df = pd.DataFrame(fresco) if fresco else pd.DataFrame(
+                        columns=['id', 'fecha', 'grupo', 'tipo', 'id_nadador', 'descripcion']
+                    )
+                    st.success("Incidencia guardada.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error BD: {e}")
+            else:
+                if nota_texto and not inc_df.empty and "tipo" in inc_df.columns:
+                    mascara = (
+                        (inc_df["fecha"].astype(str) == fecha_str)
+                        & (inc_df["grupo"].astype(str) == str(grupo_seleccionado))
+                        & (inc_df["tipo"].astype(str) == "Nota de clase")
+                    )
+                    if mascara.any():
+                        inc_df.loc[mascara, "descripcion"] = texto_inc
+                        st.session_state.incidencias_df = inc_df
+                    else:
+                        st.session_state.incidencias_df = pd.concat(
+                            [inc_df, pd.DataFrame([rec_inc])], ignore_index=True
+                        )
+                else:
+                    st.session_state.incidencias_df = pd.concat(
+                        [inc_df, pd.DataFrame([rec_inc])], ignore_index=True
+                    )
+                st.success("Incidencia guardada en esta sesión.")
 
 
 def registrar_tiempos():
@@ -671,9 +1437,12 @@ def registrar_tiempos():
         '50 Espalda', '100 Espalda', '200 Espalda', '50 Pecho', '100 Pecho', '200 Pecho',
         '50 Mariposa', '100 Mariposa', '200 Mariposa', '100 IM', '200 IM', '400 IM'
     ]
-    _nad_df = st.session_state.nadadores_df.copy()
+    _nad_df = filtrar_nadadores_activos(st.session_state.nadadores_df.copy())
     _id_col = 'id_nadador' if 'id_nadador' in _nad_df.columns else 'id'
-    nadadores = _nad_df['nombre'].tolist()
+    nadadores = _nad_df['nombre'].tolist() if not _nad_df.empty else []
+    if not nadadores:
+        st.info("No hay nadadores activos para registrar tiempos. El historial de quienes ya no vienen se conserva en Perfiles.")
+        return
 
     tab_comp, tab_ent = st.tabs(["🏆 Competencia", "🏋️ Entrenamiento"])
 
@@ -867,41 +1636,280 @@ def registrar_tiempos():
                     st.error(f"❌ Error al procesar archivo: {e}")
 
 
+def _aplicar_renombre_local(anterior, nuevo):
+    nad = st.session_state.nadadores_df
+    if nad is not None and not nad.empty and "grupo" in nad.columns:
+        nad.loc[nad["grupo"].astype(str) == anterior, "grupo"] = nuevo
+    usu = st.session_state.usuarios_df
+    if usu is not None and not usu.empty and "grupos_asignados" in usu.columns:
+        def _cambiar(valor):
+            if isinstance(valor, list):
+                return [nuevo if str(item) == anterior else item for item in valor]
+            return valor
+        usu["grupos_asignados"] = usu["grupos_asignados"].apply(_cambiar)
+        if st.session_state.user_info and "grupos_asignados" in st.session_state.user_info:
+            st.session_state.user_info["grupos_asignados"] = _cambiar(
+                st.session_state.user_info.get("grupos_asignados")
+            )
+    for clave in ("incidencias_df", "tests_df"):
+        frame = st.session_state.get(clave)
+        if frame is not None and not frame.empty and "grupo" in frame.columns:
+            frame.loc[frame["grupo"].astype(str) == anterior, "grupo"] = nuevo
+
+
+def _guardar_catalogo_grupos(renombres, agregados, nombres_finales):
+    supabase = init_connection()
+    if supabase:
+        try:
+            for anterior, nuevo in renombres:
+                supabase.table("nadadores").update({"grupo": nuevo}).eq("grupo", anterior).execute()
+                for tabla in ("incidencias_clase", "tests"):
+                    try:
+                        supabase.table(tabla).update({"grupo": nuevo}).eq("grupo", anterior).execute()
+                    except Exception:
+                        pass
+                try:
+                    cuentas = supabase.table("usuarios").select("id, grupos_asignados").execute().data or []
+                    for cuenta in cuentas:
+                        grupos = cuenta.get("grupos_asignados") or []
+                        if anterior in grupos:
+                            nuevos = [nuevo if item == anterior else item for item in grupos]
+                            supabase.table("usuarios").update(
+                                {"grupos_asignados": nuevos}
+                            ).eq("id", cuenta["id"]).execute()
+                except Exception:
+                    pass
+            tabla_grupos = []
+            try:
+                tabla_grupos = supabase.table("grupos").select("id, nombre").execute().data or []
+            except Exception as error_tabla:
+                st.warning(
+                    "La tabla de grupos todavía no existe. Ejecuta migracion_grupos_y_fecha.sql "
+                    "en Supabase para que los nombres queden guardados. Si cambiaste un nombre, "
+                    "las fichas sí se actualizaron."
+                )
+                if "grupos" not in str(error_tabla):
+                    raise
+            existentes = {_texto_limpio(fila.get("nombre")) for fila in tabla_grupos}
+            if tabla_grupos:
+                temporales = []
+                for indice, (anterior, nuevo) in enumerate(renombres):
+                    if anterior in existentes:
+                        temporal = f"__tmp_{indice}"
+                        supabase.table("grupos").update({"nombre": temporal}).eq("nombre", anterior).execute()
+                        existentes.discard(anterior)
+                        existentes.add(temporal)
+                        temporales.append((temporal, nuevo))
+                    elif nuevo not in existentes:
+                        supabase.table("grupos").insert({"nombre": nuevo}).execute()
+                        existentes.add(nuevo)
+                for temporal, nuevo in temporales:
+                    supabase.table("grupos").update({"nombre": nuevo}).eq("nombre", temporal).execute()
+                    existentes.discard(temporal)
+                    existentes.add(nuevo)
+                pendientes = agregados
+            else:
+                pendientes = nombres_finales
+            for nombre in pendientes:
+                if nombre not in existentes:
+                    try:
+                        supabase.table("grupos").insert({"nombre": nombre}).execute()
+                    except Exception:
+                        pass
+            for anterior, nuevo in renombres:
+                _aplicar_renombre_local(anterior, nuevo)
+            try:
+                fresco = supabase.table("grupos").select("*").order("nombre").execute().data or []
+                if fresco:
+                    st.session_state.grupos_df = pd.DataFrame(fresco)
+            except Exception:
+                st.session_state.grupos_df = pd.DataFrame(
+                    {"nombre": nombres_finales}
+                )
+            nad_fresh = supabase.table("nadadores").select("*").execute().data
+            if nad_fresh:
+                fresh_df = pd.DataFrame(nad_fresh)
+                if "id" in fresh_df.columns:
+                    fresh_df = fresh_df.rename(columns={"id": "id_nadador"})
+                st.session_state.nadadores_df = aplicar_categoria_en_memoria(fresh_df)
+            st.success("Grupos guardados.")
+            st.rerun()
+        except Exception as error_grupos:
+            st.error(f"No se pudieron guardar los grupos: {error_grupos}")
+        return
+
+    for anterior, nuevo in renombres:
+        _aplicar_renombre_local(anterior, nuevo)
+    catalogo = st.session_state.get("grupos_df")
+    if catalogo is None or catalogo.empty or "nombre" not in catalogo.columns:
+        finales = nombres_finales
+    else:
+        mapa = dict(renombres)
+        finales = []
+        for nombre in catalogo["nombre"].tolist():
+            nombre = mapa.get(_texto_limpio(nombre), _texto_limpio(nombre))
+            if nombre and nombre not in finales:
+                finales.append(nombre)
+        for nombre in agregados:
+            if nombre not in finales:
+                finales.append(nombre)
+    st.session_state.grupos_df = pd.DataFrame(
+        {"id": list(range(1, len(finales) + 1)), "nombre": finales}
+    )
+    st.success("Grupos guardados en esta sesión.")
+    st.rerun()
+
+
 def gestionar_nadadores():
     """Muestra el panel de gestión de perfiles de los nadadores."""
     st.header("👥 Gestión de Perfiles de Nadadores")
-    if st.session_state.user_role not in ['Entrenador', 'Master']:
-        st.error("Solamente los entrenadores autorizados pueden modificar los perfiles.")
+    rol = st.session_state.user_role
+    if rol not in ['Entrenador', 'Master', 'Directiva']:
+        st.error("Solamente la directiva, los entrenadores y el master pueden entrar a perfiles.")
         return
+    puede_editar_fichas = rol in ['Entrenador', 'Master']
 
-    tp1, tp2 = st.tabs(["Perfiles y Grupos", "📏 Datos Fisiológicos"])
+    tp1, tp2, tp3 = st.tabs(["Perfiles", "📏 Datos Fisiológicos", "Configurar grupos"])
 
     with tp1:
-        st.write("Crea nuevos nadadores o edita el grupo, categoría y sexo de los nadadores actuales.")
+        if puede_editar_fichas:
+            st.write("Edita el nombre, la fecha de nacimiento, el grupo y el sexo. La edad y la categoría se calculan solas: el fondo gris indica que esa celda no se edita.")
+        else:
+            st.info("La directiva ve las fichas y puede cambiar los nombres de los grupos en Configurar grupos. El nombre y la fecha los editan el entrenador y el master.")
+        st.caption("La fecha se escribe DD/MM/AAAA. La edad es la cumplida al 31 de diciembre y con ella se asigna la categoría. Sin fecha, la edad y la categoría quedan vacías. Desmarca Activo para ocultar a quien ya no viene: la ficha no se borra.")
+        if st.session_state.pop("perfil_guardado", False):
+            st.success("Guardado. La categoría quedó calculada con la fecha de nacimiento.")
         df = st.session_state.nadadores_df.copy()
         if 'id' in df.columns:
             df = df.drop(columns=['id'])
-        cats_oficiales = ['Infantil A', 'Infantil B1', 'Infantil B2', 'Juvenil A1', 'Juvenil A2', 'Juvenil B', 'Mayores']
+        if "activo" not in df.columns:
+            df["activo"] = True
+        else:
+            df["activo"] = df["activo"].map(es_nadador_activo)
+        df = sugerir_anios_nacimiento(df)
+        if "fecha_nacimiento" not in df.columns:
+            df["fecha_nacimiento"] = ""
+        df["fecha_nacimiento"] = df["fecha_nacimiento"].map(formatear_fecha_nacimiento)
+        if "grupo" not in df.columns:
+            df["grupo"] = ""
+        if "categoria" not in df.columns:
+            df["categoria"] = ""
+        df = _proyectar_ediciones_perfiles(df, st.session_state.get("editor_perfiles"))
+        df = con_edad_y_categoria(df)
+        columnas_editor = ["nombre", "fecha_nacimiento", "edad", "categoria", "grupo", "sexo", "activo", "id_nadador"]
+        df = df[columnas_editor]
+        faltan_fecha = [
+            str(n) for n, f in zip(df["nombre"], df["fecha_nacimiento"])
+            if not _texto_limpio(f) and pd.notna(n) and str(n).strip()
+        ]
+        if faltan_fecha:
+            st.warning("Falta la fecha de nacimiento completa (DD/MM/AAAA) de: " + ", ".join(faltan_fecha))
+        opciones_grupo = lista_grupos()
+        df["grupo"] = df["grupo"].map(_texto_limpio)
+        for grupo_extra in df["grupo"].tolist():
+            if grupo_extra and grupo_extra not in opciones_grupo:
+                opciones_grupo.append(grupo_extra)
+        if "" not in opciones_grupo:
+            opciones_grupo = [""] + opciones_grupo
         edited_df = st.data_editor(
-            df, use_container_width=True, num_rows="dynamic",
+            presentacion_perfiles(df, solo_lectura=not puede_editar_fichas),
+            use_container_width=True, num_rows="dynamic" if puede_editar_fichas else "fixed",
+            disabled=not puede_editar_fichas,
+            key="editor_perfiles",
             column_config={
-                "categoria": st.column_config.SelectboxColumn("Categoría", options=cats_oficiales, required=True),
-                "sexo": st.column_config.SelectboxColumn("Sexo", options=["Masculino", "Femenino"], required=True)
+                "id_nadador": None,
+                "nombre": st.column_config.TextColumn("Nombre"),
+                "fecha_nacimiento": st.column_config.TextColumn(
+                    "Fecha de nacimiento", help="DD/MM/AAAA"
+                ),
+                "edad": st.column_config.TextColumn(
+                    "Edad", disabled=True,
+                    help="Edad cumplida al 31 de diciembre. Define la categoría."
+                ),
+                "categoria": st.column_config.TextColumn("Categoría", disabled=True),
+                "grupo": st.column_config.SelectboxColumn("Grupo", options=opciones_grupo, required=True),
+                "sexo": st.column_config.SelectboxColumn(
+                    "Sexo", options=["Femenino", "Masculino"], required=True
+                ),
+                "activo": st.column_config.CheckboxColumn("Activo", default=True),
             }
         )
-        if st.button("Guardar Perfiles", type="primary"):
-            st.session_state.nadadores_df = edited_df.copy()
+        if puede_editar_fichas and st.button("Guardar Perfiles", type="primary"):
             supabase = init_connection()
             if supabase:
+                errores = []
+                falta_columna = False
                 try:
                     for _, row in edited_df.iterrows():
-                        r = row.to_dict()
-                        id_val = r.pop('id_nadador', None)
-                        r_clean = {k: v for k, v in r.items() if pd.notna(v)}
-                        if pd.notna(id_val):
-                            supabase.table("nadadores").update(r_clean).eq("id", int(id_val)).execute()
-                        else:
-                            supabase.table("nadadores").insert(r_clean).execute()
+                        nombre = str(row.get("nombre") or "").strip()
+                        if not nombre or nombre.lower() == "none":
+                            continue
+                        sexo = _texto_limpio(row.get("sexo"))
+                        if sexo not in ("Femenino", "Masculino"):
+                            errores.append(f"{nombre}: elige Femenino o Masculino.")
+                            continue
+                        id_val = _anio_entero(row.get("id_nadador"))
+                        grupo = _texto_limpio(row.get("grupo"))
+                        if not grupo:
+                            errores.append(f"{nombre}: elige un grupo.")
+                            continue
+                        fecha = parse_fecha_nacimiento(row.get("fecha_nacimiento"))
+                        if fecha == "invalid":
+                            errores.append(f"{nombre}: la fecha debe ir en formato DD/MM/AAAA.")
+                            continue
+                        if fecha is None:
+                            errores.append(f"{nombre}: indica la fecha de nacimiento (DD/MM/AAAA).")
+                            continue
+                        anio = fecha.year
+                        if anio < 1920 or anio > datetime.now().year:
+                            errores.append(f"{nombre}: el año {anio} no es válido.")
+                            continue
+                        cat = categoria_por_anio_nacimiento(anio)
+                        if not cat:
+                            errores.append(f"{nombre}: esa fecha no entra en una categoría FECHIDA.")
+                            continue
+                        rec = {
+                            "nombre": nombre,
+                            "sexo": sexo,
+                            "categoria": cat,
+                            "anio_nacimiento": anio,
+                            "fecha_nacimiento": fecha.strftime("%Y-%m-%d"),
+                            "grupo": grupo,
+                            "activo": es_nadador_activo(row.get("activo")),
+                        }
+
+                        def _enviar(payload):
+                            if id_val is not None:
+                                supabase.table("nadadores").update(payload).eq("id", id_val).execute()
+                            else:
+                                supabase.table("nadadores").insert(payload).execute()
+
+                        payload = dict(rec)
+                        ultimo_error = None
+                        for _intento in range(4):
+                            try:
+                                _enviar(payload)
+                                ultimo_error = None
+                                break
+                            except Exception as e_fila:
+                                ultimo_error = e_fila
+                                msg = str(e_fila)
+                                if "fecha_nacimiento" in payload and "fecha_nacimiento" in msg:
+                                    payload.pop("fecha_nacimiento", None)
+                                    falta_columna = True
+                                    continue
+                                if "anio_nacimiento" in payload and "anio_nacimiento" in msg:
+                                    payload.pop("anio_nacimiento", None)
+                                    falta_columna = True
+                                    continue
+                                if "activo" in payload and "activo" in msg:
+                                    payload.pop("activo", None)
+                                    falta_columna = True
+                                    continue
+                                break
+                        if ultimo_error is not None:
+                            errores.append(f"{nombre}: {ultimo_error}")
+
                     nad_fresh = supabase.table("nadadores").select("*").execute().data
                     if nad_fresh:
                         fresh_df = pd.DataFrame(nad_fresh)
@@ -909,12 +1917,36 @@ def gestionar_nadadores():
                             if 'id_nadador' in fresh_df.columns:
                                 fresh_df = fresh_df.drop(columns=['id_nadador'])
                             fresh_df = fresh_df.rename(columns={'id': 'id_nadador'})
+                        fresh_df = aplicar_categoria_en_memoria(fresh_df)
                         st.session_state.nadadores_df = fresh_df
-                    st.success("✅ Guardado seguro en Supabase.")
+                    if falta_columna:
+                        st.warning("La base todavía no tiene alguna columna nueva (fecha de nacimiento, año o activo). El resto del perfil se guardó. Ejecuta las migraciones en Supabase antes de volver a guardar.")
+                    if errores:
+                        st.error("No se guardaron algunas filas: " + " | ".join(errores))
+                    elif not falta_columna:
+                        st.session_state.perfil_guardado = True
+                        st.rerun()
                 except Exception as e:
                     st.error(f"Error Supabase guardando perfiles: {e}")
             else:
-                st.success("Perfiles guardados en el Prototipo Temporal.")
+                editado = edited_df.copy()
+                editado = editado[editado["nombre"].map(lambda n: bool(_texto_limpio(n)))].copy()
+                fechas = editado["fecha_nacimiento"].map(parse_fecha_nacimiento)
+                sexos_ok = editado["sexo"].map(lambda s: _texto_limpio(s) in ("Femenino", "Masculino"))
+                grupos_ok = editado["grupo"].map(lambda g: bool(_texto_limpio(g)))
+                if editado.empty:
+                    st.error("No hay nadadores para guardar.")
+                elif (fechas == "invalid").any() or fechas.map(lambda f: f is None).any():
+                    st.error("Cada nadador necesita una fecha DD/MM/AAAA válida.")
+                elif not sexos_ok.all() or not grupos_ok.all():
+                    st.error("Cada nadador necesita sexo y grupo.")
+                else:
+                    editado = editado.drop(columns=["edad"], errors="ignore")
+                    editado["anio_nacimiento"] = fechas.map(lambda f: f.year)
+                    editado["fecha_nacimiento"] = fechas.map(lambda f: f.strftime("%Y-%m-%d"))
+                    editado["categoria"] = editado["anio_nacimiento"].map(categoria_por_anio_nacimiento)
+                    st.session_state.nadadores_df = aplicar_categoria_en_memoria(editado)
+                    st.success("Perfiles guardados en el Prototipo Temporal.")
 
     with tp2:
         st.write("Registra y visualiza la evolución física de cada nadador. Incluye medidas clave para el rendimiento en natación.")
@@ -922,42 +1954,45 @@ def gestionar_nadadores():
         nad_fis_row = st.session_state.nadadores_df[st.session_state.nadadores_df['nombre'] == nad_fis_sel]
         id_nad_fis = int(nad_fis_row.iloc[0]['id_nadador']) if not nad_fis_row.empty else None
 
-        with st.form("form_datos_fisicos"):
-            st.markdown("**Medidas Antropométricas**")
-            cf1, cf2, cf3 = st.columns(3)
-            with cf1:
-                fecha_fis    = st.date_input("Fecha", datetime.today(), key="fecha_fis")
-                estatura     = st.number_input("Estatura (cm)", min_value=50.0, max_value=250.0, value=160.0, step=0.5, help="Talla de pie sin calzado")
-            with cf2:
-                peso         = st.number_input("Peso (kg)", min_value=10.0, max_value=200.0, value=55.0, step=0.1)
-                envergadura  = st.number_input("Envergadura de brazos (cm)", min_value=50.0, max_value=300.0, value=165.0, step=0.5,
-                                               help="Distancia punta a punta con los brazos extendidos horizontalmente")
-            with cf3:
-                talla_sent   = st.number_input("Talla sentado (cm)", min_value=30.0, max_value=160.0, value=85.0, step=0.5,
-                                               help="Altura desde la silla hasta la coronilla. Indica longitud de tronco.")
-                porc_grasa   = st.number_input("% Grasa corporal", min_value=0.0, max_value=60.0, value=15.0, step=0.1,
-                                               help="Porcentaje de masa grasa estimado (pliegues cutáneos o bioimpedancia)")
-            obs_fis = st.text_input("Observaciones", placeholder="Opcional")
+        if not puede_editar_fichas:
+            st.info("La directiva puede revisar las medidas. El entrenador y el master las registran.")
+        else:
+            with st.form("form_datos_fisicos"):
+                st.markdown("**Medidas Antropométricas**")
+                cf1, cf2, cf3 = st.columns(3)
+                with cf1:
+                    fecha_fis    = st.date_input("Fecha", datetime.today(), key="fecha_fis")
+                    estatura     = st.number_input("Estatura (cm)", min_value=50.0, max_value=250.0, value=160.0, step=0.5, help="Talla de pie sin calzado")
+                with cf2:
+                    peso         = st.number_input("Peso (kg)", min_value=10.0, max_value=200.0, value=55.0, step=0.1)
+                    envergadura  = st.number_input("Envergadura de brazos (cm)", min_value=50.0, max_value=300.0, value=165.0, step=0.5,
+                                                   help="Distancia punta a punta con los brazos extendidos horizontalmente")
+                with cf3:
+                    talla_sent   = st.number_input("Talla sentado (cm)", min_value=30.0, max_value=160.0, value=85.0, step=0.5,
+                                                   help="Altura desde la silla hasta la coronilla. Indica longitud de tronco.")
+                    porc_grasa   = st.number_input("% Grasa corporal", min_value=0.0, max_value=60.0, value=15.0, step=0.1,
+                                                   help="Porcentaje de masa grasa estimado (pliegues cutáneos o bioimpedancia)")
+                obs_fis = st.text_input("Observaciones", placeholder="Opcional")
 
-            if st.form_submit_button("💾 Guardar Datos Físicos", type="primary"):
-                if id_nad_fis:
-                    rec_fis = {
-                        "id_nadador": id_nad_fis,
-                        "fecha": fecha_fis.strftime('%Y-%m-%d'),
-                        "estatura_cm": estatura, "peso_kg": peso,
-                        "envergadura_cm": envergadura, "talla_sentado_cm": talla_sent,
-                        "porc_grasa": porc_grasa, "observaciones": obs_fis
-                    }
-                    supabase = init_connection()
-                    if supabase:
-                        try:
-                            supabase.table("datos_fisicos").insert(rec_fis).execute()
-                            st.success("✅ Datos físicos guardados.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error BD: {e}")
-                    else:
-                        st.success("Modo local: Datos guardados (simulado).")
+                if st.form_submit_button("💾 Guardar Datos Físicos", type="primary"):
+                    if id_nad_fis:
+                        rec_fis = {
+                            "id_nadador": id_nad_fis,
+                            "fecha": fecha_fis.strftime('%Y-%m-%d'),
+                            "estatura_cm": estatura, "peso_kg": peso,
+                            "envergadura_cm": envergadura, "talla_sentado_cm": talla_sent,
+                            "porc_grasa": porc_grasa, "observaciones": obs_fis
+                        }
+                        supabase = init_connection()
+                        if supabase:
+                            try:
+                                supabase.table("datos_fisicos").insert(rec_fis).execute()
+                                st.success("✅ Datos físicos guardados.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error BD: {e}")
+                        else:
+                            st.success("Modo local: Datos guardados (simulado).")
 
         # ── Historial tabular + gráficas ──
         dfis = st.session_state.get('datos_fisicos_df', pd.DataFrame())
@@ -1011,6 +2046,34 @@ def gestionar_nadadores():
         else:
             st.info("Aún no hay datos fisiológicos registrados.")
 
+    with tp3:
+        st.write("Agrega grupos o cámbiales el nombre. Esos nombres son los que aparecen en el menú de cada ficha.")
+        st.caption("Un cambio de nombre se aplica en las fichas, en las cuentas de entrenador, en las incidencias y en los tests. Desde aquí no se elimina un grupo.")
+        editor_grupos = pd.DataFrame({"anterior": lista_grupos(), "nombre": lista_grupos()})
+        grupos_editados = st.data_editor(
+            editor_grupos,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "anterior": None,
+                "nombre": st.column_config.TextColumn("Grupo", required=True),
+            },
+            key="editor_grupos",
+        )
+        if st.button("Guardar grupos", type="primary"):
+            filas_grupo = grupos_editados.to_dict("records")
+            renombres, agregados, errores_grupo = cambios_de_grupos(filas_grupo)
+            if errores_grupo:
+                st.error(" ".join(errores_grupo))
+            else:
+                nombres_finales = []
+                for fila in filas_grupo:
+                    nombre = _texto_limpio(fila.get("nombre"))
+                    if nombre and nombre not in nombres_finales:
+                        nombres_finales.append(nombre)
+                _guardar_catalogo_grupos(renombres, agregados, nombres_finales)
+
 def configurar_marcas():
     """Muestra el contenido de la configuración de Marcas Mínimas por Categoría."""
     st.header("⚙️ Configuración de Marcas Mínimas")
@@ -1020,8 +2083,11 @@ def configurar_marcas():
         st.error("No tienes permiso para configurar las metas del equipo.")
         return
         
-    st.info("ℹ️ Ingresa los tiempos en formato **MM:SS,MS** (Ejemplo: 01:05,50). La columna 'Segundos' se calculará automáticamente al guardar.")
-    
+    if st.session_state.pop("marcas_cargadas", None):
+        st.success(st.session_state.pop("marcas_cargadas_msg", "Marcas actualizadas."))
+
+    tab_una, tab_masiva = st.tabs(["📝 Una a una", "📥 Carga masiva"])
+
     # 2. Definición de opciones para los desplegables (Matching con la DB)
     cats_oficiales = [
         'Infantil A', 'Infantil B1', 'Infantil B2', 
@@ -1036,61 +2102,154 @@ def configurar_marcas():
         '100 IM', '200 IM', '400 IM'
     ]
 
-    # 3. Preparar los datos para el editor
-    df = st.session_state.marcas_df.copy()
-    
-    # Asegurarnos de que las columnas necesarias existan para evitar errores en el editor
-    for col in ['categoria', 'estilo', 'sexo', 'tiempo_objetivo', 'segundos']:
-        if col not in df.columns:
-            df[col] = None
+    with tab_una:
+        st.info("ℹ️ Ingresa los tiempos en formato **MM:SS,MS** (Ejemplo: 01:05,50). La columna 'Segundos' se calculará automáticamente al guardar.")
 
-    # 4. El Editor de Datos (Data Editor)
-    edited_df = st.data_editor(
-        df, 
-        use_container_width=True, 
-        num_rows="dynamic",
-        column_config={
-            "categoria": st.column_config.SelectboxColumn("Categoría", options=cats_oficiales, required=True),
-            "estilo": st.column_config.SelectboxColumn("Estilo", options=estilos_oficiales, required=True),
-            "sexo": st.column_config.SelectboxColumn("Sexo", options=["Masculino", "Femenino", "Ambos"], required=True),
-            "tiempo_objetivo": st.column_config.TextColumn("Marca (MM:SS,MS)", required=True),
-            "segundos": st.column_config.NumberColumn("Segundos (Auto)", disabled=True, format="%.2f")
-        },
-        hide_index=True
-    )
-    
-    # 5. Lógica de Guardado
-    if st.button("Guardar Cambios permanentemente", type="primary"):
-        # PASO CRÍTICO: Convertir el texto de tiempo a segundos antes de enviar a Supabase
-        try:
-            # Aplicamos la función de conversión a cada fila
-            edited_df['segundos'] = edited_df['tiempo_objetivo'].apply(convertir_tiempo_a_segundos)
-            
-            # Actualizamos el estado de la sesión
-            st.session_state.marcas_df = edited_df.copy()
-            
-            supabase = init_connection()
-            if supabase:
-                # Limpiar datos viejos y cargar los nuevos (Estrategia de reseteo)
-                # Nota: .neq("categoria", "ELIMINATODO") es un truco para borrar todo el contenido
-                supabase.table("marcas_minimas").delete().neq("categoria", "ELIMINATODO").execute()
+        # 3. Preparar los datos para el editor
+        df = st.session_state.marcas_df.copy()
+        
+        # Asegurarnos de que las columnas necesarias existan para evitar errores en el editor
+        for col in ['categoria', 'estilo', 'sexo', 'tiempo_objetivo', 'segundos']:
+            if col not in df.columns:
+                df[col] = None
 
-                # Dentro de la lógica de guardado:
-                recs = edited_df.to_dict('records')
-                # Asegúrate de que el diccionario tenga las llaves correctas para la BD
-                for r in recs:
-                    r['segundos_objetivo'] = r.pop('segundos') # Cambiamos el nombre para que coincida con SQL
-                if recs:
-                    supabase.table("marcas_minimas").insert(recs).execute()
+        # 4. El Editor de Datos (Data Editor)
+        edited_df = st.data_editor(
+            df, 
+            use_container_width=True, 
+            num_rows="dynamic",
+            column_config={
+                "categoria": st.column_config.SelectboxColumn("Categoría", options=cats_oficiales, required=True),
+                "estilo": st.column_config.SelectboxColumn("Estilo", options=estilos_oficiales, required=True),
+                "sexo": st.column_config.SelectboxColumn("Sexo", options=["Masculino", "Femenino", "Ambos"], required=True),
+                "tiempo_objetivo": st.column_config.TextColumn("Marca (MM:SS,MS)", required=True),
+                "segundos": st.column_config.NumberColumn("Segundos (Auto)", disabled=True, format="%.2f")
+            },
+            hide_index=True,
+            key="editor_marcas"
+        )
+        
+        # 5. Lógica de Guardado
+        if st.button("Guardar Cambios permanentemente", type="primary"):
+            # PASO CRÍTICO: Convertir el texto de tiempo a segundos antes de enviar a Supabase
+            try:
+                # Aplicamos la función de conversión a cada fila
+                edited_df['segundos'] = edited_df['tiempo_objetivo'].apply(convertir_tiempo_a_segundos)
                 
-                st.success("✅ ¡Configuración guardada exitosamente en la base de datos!")
-                st.balloons()
-            else:
-                st.warning("⚠️ Modo local: Los cambios se guardaron solo para esta sesión.")
+                # Actualizamos el estado de la sesión
+                st.session_state.marcas_df = edited_df.copy()
                 
-        except Exception as e:
-            st.error(f"❌ Error al procesar los datos: {e}")
-            st.info("Asegúrate de que todos los tiempos tengan el formato correcto (ej: 01:30,00)")
+                supabase = init_connection()
+                if supabase:
+                    # Limpiar datos viejos y cargar los nuevos (Estrategia de reseteo)
+                    # Nota: .neq("categoria", "ELIMINATODO") es un truco para borrar todo el contenido
+                    supabase.table("marcas_minimas").delete().neq("categoria", "ELIMINATODO").execute()
+
+                    # Dentro de la lógica de guardado:
+                    recs = edited_df.to_dict('records')
+                    # Asegúrate de que el diccionario tenga las llaves correctas para la BD
+                    for r in recs:
+                        r['segundos_objetivo'] = r.pop('segundos') # Cambiamos el nombre para que coincida con SQL
+                    if recs:
+                        supabase.table("marcas_minimas").insert(recs).execute()
+                    
+                    st.success("✅ ¡Configuración guardada exitosamente en la base de datos!")
+                    st.balloons()
+                else:
+                    st.warning("⚠️ Modo local: Los cambios se guardaron solo para esta sesión.")
+                    
+            except Exception as e:
+                st.error(f"❌ Error al procesar los datos: {e}")
+                st.info("Asegúrate de que todos los tiempos tengan el formato correcto (ej: 01:30,00)")
+
+    with tab_masiva:
+        import io as _io
+        st.info(
+            "💡 **Pasos:**  \n"
+            "1. Descarga la plantilla. Ya trae cada categoría, estilo y sexo, y el tiempo si ya existe.  \n"
+            "2. Completa **tiempo_objetivo** en formato MM:SS,MS (ejemplo: 01:05,50). Las filas vacías se ignoran.  \n"
+            "3. Sube el CSV o Excel. Solo se agregan o actualizan las filas del archivo; el resto de las marcas sigue igual."
+        )
+        actuales = {}
+        base = st.session_state.marcas_df
+        if not base.empty and {"categoria", "estilo", "sexo"}.issubset(base.columns):
+            col_tiempo = "tiempo_objetivo" if "tiempo_objetivo" in base.columns else None
+            for _, row in base.iterrows():
+                tiempo = "" if col_tiempo is None or pd.isna(row.get(col_tiempo)) else str(row.get(col_tiempo)).strip()
+                actuales[(str(row["categoria"]), str(row["estilo"]), str(row["sexo"]))] = tiempo
+        filas_plantilla = []
+        for cat in cats_oficiales:
+            for estilo in estilos_oficiales:
+                for sexo in ("Masculino", "Femenino"):
+                    filas_plantilla.append({
+                        "categoria": cat,
+                        "estilo": estilo,
+                        "sexo": sexo,
+                        "tiempo_objetivo": actuales.get((cat, estilo, sexo), ""),
+                    })
+        for (cat, estilo, sexo), tiempo in actuales.items():
+            if sexo == "Ambos":
+                filas_plantilla.append({
+                    "categoria": cat, "estilo": estilo, "sexo": sexo, "tiempo_objetivo": tiempo,
+                })
+        buf_marcas = _io.StringIO()
+        pd.DataFrame(filas_plantilla).to_csv(buf_marcas, index=False)
+        st.download_button(
+            "📥 Descargar plantilla de marcas",
+            buf_marcas.getvalue().encode("utf-8"),
+            "plantilla_marcas_minimas.csv",
+            "text/csv",
+        )
+        st.markdown("---")
+        up_marcas = st.file_uploader("Sube tu archivo (CSV o Excel)", type=["csv", "xlsx"], key="up_marcas")
+        if up_marcas:
+            try:
+                df_up = pd.read_csv(up_marcas, encoding="utf-8-sig") if up_marcas.name.lower().endswith(".csv") else pd.read_excel(up_marcas)
+                recs, errores, avisos = preparar_carga_marcas(df_up, cats_oficiales, estilos_oficiales)
+                if errores:
+                    st.error("No se cargó nada. Corrige el archivo y vuelve a subirlo.\n\n" + "\n".join(f"- {e}" for e in errores))
+                else:
+                    for aviso in avisos:
+                        st.warning(aviso)
+                    if not recs:
+                        st.warning("No hay filas con tiempo para cargar.")
+                    else:
+                        st.write("🔍 Vista previa de lo que se va a guardar:")
+                        st.dataframe(pd.DataFrame(recs), use_container_width=True, hide_index=True)
+                        if st.button("🚀 Cargar marcas del archivo", type="primary"):
+                            sb = init_connection()
+                            if sb:
+                                try:
+                                    sb.table("marcas_minimas").upsert(
+                                        recs, on_conflict="categoria,estilo,sexo"
+                                    ).execute()
+                                    fresco = sb.table("marcas_minimas").select("*").execute().data
+                                    if fresco:
+                                        m_df = pd.DataFrame(fresco)
+                                        if "segundos_objetivo" in m_df.columns and "segundos" not in m_df.columns:
+                                            m_df = m_df.rename(columns={"segundos_objetivo": "segundos"})
+                                        st.session_state.marcas_df = m_df
+                                    st.session_state.marcas_cargadas = True
+                                    st.session_state.marcas_cargadas_msg = f"✅ {len(recs)} marcas cargadas. Las que no venían en el archivo se mantuvieron."
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error BD: {e}")
+                            else:
+                                nuevas = pd.DataFrame(recs).rename(columns={"segundos_objetivo": "segundos"})
+                                previas = st.session_state.marcas_df.copy()
+                                if not previas.empty and {"categoria", "estilo", "sexo"}.issubset(previas.columns):
+                                    claves = set(zip(nuevas["categoria"], nuevas["estilo"], nuevas["sexo"]))
+                                    mask = [
+                                        (c, e, s) not in claves
+                                        for c, e, s in zip(previas["categoria"], previas["estilo"], previas["sexo"])
+                                    ]
+                                    previas = previas.loc[mask]
+                                st.session_state.marcas_df = pd.concat([previas, nuevas], ignore_index=True)
+                                st.session_state.marcas_cargadas = True
+                                st.session_state.marcas_cargadas_msg = f"✅ {len(recs)} marcas cargadas en esta sesión. Las que no venían en el archivo se mantuvieron."
+                                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Error al procesar archivo: {e}")
 
 
 def panel_master():
@@ -1099,40 +2258,115 @@ def panel_master():
     st.write("Gestiona el acceso de los usuarios nuevos que se han registrado.")
     st.write("Crea cuentas de acceso para tu equipo. Las cuentas creadas aquí se activan automáticamente.")
     
+    etiquetas_fichas = {}
+    fichas = st.session_state.nadadores_df
+    if fichas is not None and not fichas.empty:
+        for _, ficha in fichas.iterrows():
+            id_ficha = _anio_entero(ficha.get("id_nadador"))
+            if id_ficha is None:
+                continue
+            marca = "" if es_nadador_activo(ficha.get("activo")) else " · inactivo"
+            etiquetas_fichas[f"{ficha.get('nombre')} ({ficha.get('grupo') or 'sin grupo'}){marca}"] = id_ficha
+
     with st.expander("➕ Crear Nueva Cuenta", expanded=True):
         with st.form("form_crear_usuario"):
             c1, c2 = st.columns(2)
             with c1:
                 nuevo_nombre = st.text_input("Nombre Completo")
                 nuevo_email = st.text_input("Correo Electrónico")
-                nuevos_grupos = st.multiselect("Grupos Asignados (Opcional)", ["Todos", "Competitivo", "Precompetitivo", "Formativo", "Elite", "Master"])
+                nuevos_grupos = st.multiselect("Grupos Asignados (Opcional)", ["Todos"] + lista_grupos())
             with c2:
                 nueva_clave = st.text_input("Contraseña Temporal", type="password")
                 nuevo_rol = st.selectbox("Rol del Usuario", ["Nadador", "Entrenador", "Directiva", "Master"])
+                ficha_cuenta = st.selectbox(
+                    "Ficha del nadador (obligatoria si el rol es Nadador)",
+                    ["—"] + list(etiquetas_fichas),
+                )
             
             if st.form_submit_button("Crear y Autorizar Usuario"):
                 if nuevo_nombre and nuevo_email and nueva_clave:
                     if nuevo_email in st.session_state.usuarios_df['email'].values:
                         st.error("Este correo ya existe en la base de datos.")
+                    elif nuevo_rol == "Nadador" and ficha_cuenta == "—":
+                        st.error("Elige la ficha del nadador. Esa es la información que verá en su dashboard.")
                     else:
                         supabase = init_connection()
                         if supabase:
                             try:
-                                supabase.table("usuarios").insert({
-                                    "nombre": nuevo_nombre, "email": nuevo_email, 
+                                rec_usuario = {
+                                    "nombre": nuevo_nombre, "email": nuevo_email,
                                     "clave": nueva_clave, "rol": nuevo_rol, "validado": True,
-                                    "grupos_asignados": nuevos_grupos
-                                }).execute()
-                                st.success(f"¡Cuenta para {nuevo_nombre} creada exitosamente en BD! Ya le puedes enviar su correo y contraseña provisional.")
+                                    "grupos_asignados": nuevos_grupos,
+                                }
+                                if nuevo_rol == "Nadador":
+                                    rec_usuario["id_nadador"] = int(etiquetas_fichas[ficha_cuenta])
+                                try:
+                                    supabase.table("usuarios").insert(rec_usuario).execute()
+                                except Exception as e_ins:
+                                    if "id_nadador" in rec_usuario and "id_nadador" in str(e_ins):
+                                        rec_usuario.pop("id_nadador", None)
+                                        supabase.table("usuarios").insert(rec_usuario).execute()
+                                        st.warning("La cuenta se creó, pero la base todavía no puede vincular la ficha. Ejecuta migracion_activo_y_cuenta.sql.")
+                                    else:
+                                        raise
+                                fresco = supabase.table("usuarios").select("*").execute().data
+                                if fresco:
+                                    u_df = pd.DataFrame(fresco)
+                                    if "id" in u_df.columns:
+                                        u_df = u_df.rename(columns={"id": "id_usuario"})
+                                    st.session_state.usuarios_df = u_df
+                                st.success(f"¡Cuenta para {nuevo_nombre} creada! Ya le puedes enviar su correo y contraseña provisional.")
                             except Exception as e: st.error(f"Error BD: {e}")
                         else:
                             st.info("Prototipo local: Usuario creado temporalmente.")
                 else:
                     st.error("Completa todos los campos.")
-                    
+
+    st.markdown("---")
+    st.subheader("Vincular una cuenta que ya existe")
+    st.write("La cuenta entra al dashboard del nadador. La ficha es el registro deportivo. Aquí se unen las dos.")
+    cuentas_nad = st.session_state.usuarios_df
+    if "rol" in cuentas_nad.columns:
+        cuentas_nad = cuentas_nad[cuentas_nad["rol"] == "Nadador"]
+    else:
+        cuentas_nad = cuentas_nad.iloc[0:0]
+    if cuentas_nad.empty or not etiquetas_fichas:
+        st.info("Cuando exista una cuenta con rol Nadador y al menos una ficha, podrás vincularlas aquí.")
+    else:
+        opciones_cuentas = [
+            f"{row.get('nombre')} · {row.get('email')}"
+            for _, row in cuentas_nad.iterrows()
+        ]
+        cuenta_sel = st.selectbox("Cuenta", opciones_cuentas, key="vincular_cuenta")
+        ficha_sel = st.selectbox("Ficha", list(etiquetas_fichas), key="vincular_ficha")
+        if st.button("Guardar vínculo", type="primary"):
+            fila_cuenta = cuentas_nad.iloc[opciones_cuentas.index(cuenta_sel)]
+            supabase = init_connection()
+            if supabase:
+                try:
+                    supabase.table("usuarios").update(
+                        {"id_nadador": int(etiquetas_fichas[ficha_sel])}
+                    ).eq("id", int(fila_cuenta["id_usuario"])).execute()
+                    fresco = supabase.table("usuarios").select("*").execute().data
+                    if fresco:
+                        u_df = pd.DataFrame(fresco)
+                        if "id" in u_df.columns:
+                            u_df = u_df.rename(columns={"id": "id_usuario"})
+                        st.session_state.usuarios_df = u_df
+                    st.success("La cuenta quedó vinculada a esa ficha.")
+                except Exception as e:
+                    st.error(f"No se pudo vincular. Si la columna no existe, ejecuta migracion_activo_y_cuenta.sql. Detalle: {e}")
+            else:
+                st.info("Prototipo local: el vínculo no se guarda en Supabase.")
+
     st.markdown("---")
     st.subheader("Directorio de Usuarios Activos")
-    st.dataframe(st.session_state.usuarios_df[['id_usuario', 'nombre', 'email', 'rol']], hide_index=True, use_container_width=True)
+    directorio = st.session_state.usuarios_df.copy()
+    if "id_nadador" in directorio.columns and not st.session_state.nadadores_df.empty:
+        nombres = st.session_state.nadadores_df[["id_nadador", "nombre"]].rename(columns={"nombre": "ficha"})
+        directorio = directorio.merge(nombres, on="id_nadador", how="left")
+    columnas_dir = [c for c in ["id_usuario", "nombre", "email", "rol", "ficha"] if c in directorio.columns]
+    st.dataframe(directorio[columnas_dir], hide_index=True, use_container_width=True)
 
 
 def mostrar_tests():
@@ -1183,7 +2417,7 @@ def mostrar_tests():
                     nombre_t = st.text_input("Nombre del Test", placeholder="Ej: 10×400m Libre")
                     fecha_t  = st.date_input("Fecha", datetime.today(), key="fecha_test")
                 with ct2:
-                    grupo_t  = st.selectbox("Grupo", ['Competitivo', 'Precompetitivo', 'Elite', 'Formativo', 'Todos'])
+                    grupo_t  = st.selectbox("Grupo", ["Todos"] + lista_grupos())
                     desc_t   = st.text_area("Descripción", placeholder="Ej: 10 rep. de 400m libre con 30s descanso")
                 if st.form_submit_button("✅ Crear Test", type="primary"):
                     if nombre_t.strip():
@@ -1215,7 +2449,7 @@ def mostrar_tests():
                 test_id  = test_row.get('id')
                 grupo_ts = test_row.get('grupo', 'Todos')
 
-                nad_df2  = st.session_state.nadadores_df
+                nad_df2 = filtrar_nadadores_activos(st.session_state.nadadores_df)
                 nads_filtrados = nad_df2 if grupo_ts == 'Todos' else nad_df2[nad_df2['grupo'] == grupo_ts]
 
                 if nads_filtrados.empty:
@@ -1268,7 +2502,8 @@ if 'logged_in' not in st.session_state:
     # Cargar datos una sola vez (desde BD si existe, si no locales)
     (
         nadadores_df, tiempos_df, usuarios_df, marcas_df,
-        incidencias_df, tests_df, resultados_test_df, datos_fisicos_df, tiempos_ent_df
+        incidencias_df, tests_df, resultados_test_df, datos_fisicos_df, tiempos_ent_df,
+        grupos_df,
     ) = cargar_datos()
     st.session_state.nadadores_df         = nadadores_df
     st.session_state.tiempos_df           = tiempos_df
@@ -1279,8 +2514,22 @@ if 'logged_in' not in st.session_state:
     st.session_state.resultados_test_df   = resultados_test_df
     st.session_state.datos_fisicos_df     = datos_fisicos_df
     st.session_state.tiempos_ent_df       = tiempos_ent_df
+    st.session_state.grupos_df            = grupos_df
+    try:
+        token_guardado = st.context.cookies.get("acuatico_sesion", "")
+    except Exception:
+        token_guardado = ""
+    usuario_previo = restaurar_usuario(token_guardado, st.session_state.usuarios_df)
+    if usuario_previo is not None:
+        st.session_state.logged_in = True
+        st.session_state.user_role = usuario_previo["rol"]
+        st.session_state.user_name = usuario_previo["nombre"]
+        st.session_state.user_info = usuario_previo.to_dict()
 
 # --- Pantalla de Login ---
+if st.session_state.pop("borrar_cookie", False):
+    sincronizar_cookie_sesion(borrar=True)
+
 if not st.session_state.logged_in:
     col1, col2 = st.columns([1, 5])
     with col1:
@@ -1310,6 +2559,7 @@ if not st.session_state.logged_in:
                     st.session_state.user_role = user_info['rol']
                     st.session_state.user_name = user_info['nombre']
                     st.session_state.user_info = user_info.to_dict()
+                    sincronizar_cookie_sesion(firmar_sesion(int(user_info["id_usuario"]), _secreto_sesion()))
                     st.rerun()
                 else:
                     st.error("Tu perfil aún no ha sido validado.")
@@ -1324,20 +2574,26 @@ else:
     opciones_menu = ["📊 Dashboard"]
     if st.session_state.user_role in ['Entrenador', 'Directiva', 'Master']:
         opciones_menu.append("🗓️ Asistencia")
-    if st.session_state.user_role in ['Entrenador', 'Master']:
+    if st.session_state.user_role in ['Entrenador', 'Directiva', 'Master']:
         opciones_menu.append("👥 Perfiles")
     if st.session_state.user_role in ['Entrenador', 'Master', 'Directiva']:
         opciones_menu.extend(["⏱️ Registrar Tiempos", "⚙️ Configurar Marcas", "🏁 Tests"])
     if st.session_state.user_role == 'Master':
         opciones_menu.append("🛡️ Admin Usuarios")
     
-    page = st.radio(
-        "Navegación",
-        opciones_menu,
-        label_visibility="collapsed",
-        horizontal=True,
-        key="navigation"
-    )
+    paginas = {
+        "📊 Dashboard": mostrar_dashboard,
+        "🗓️ Asistencia": mostrar_asistencia,
+        "👥 Perfiles": gestionar_nadadores,
+        "⏱️ Registrar Tiempos": registrar_tiempos,
+        "⚙️ Configurar Marcas": configurar_marcas,
+        "🏁 Tests": mostrar_tests,
+        "🛡️ Admin Usuarios": panel_master,
+    }
+    solapas = st.tabs(opciones_menu)
+    sincronizar_cookie_sesion(firmar_sesion(
+        int(st.session_state.user_info["id_usuario"]), _secreto_sesion()
+    ))
     
     # Botón de cerrar sesión en la barra lateral
     st.sidebar.image("logo.png", use_container_width=True)
@@ -1367,22 +2623,9 @@ else:
         st.session_state.user_role = None
         st.session_state.user_name = None
         st.session_state.user_info = None
+        st.session_state.borrar_cookie = True
         st.rerun()
 
-    st.markdown("---") # Separador visual
-
-    # --- Renderizado de la Página Seleccionada ---
-    if page == "📊 Dashboard":
-        mostrar_dashboard()
-    elif page == "🗓️ Asistencia":
-        mostrar_asistencia()
-    elif page == "⏱️ Registrar Tiempos":
-        registrar_tiempos()
-    elif page == "👥 Perfiles":
-        gestionar_nadadores()
-    elif page == "⚙️ Configurar Marcas":
-        configurar_marcas()
-    elif page == "🏁 Tests":
-        mostrar_tests()
-    elif page == "🛡️ Admin Usuarios":
-        panel_master()
+    for solapa, nombre in zip(solapas, opciones_menu):
+        with solapa:
+            paginas[nombre]()
