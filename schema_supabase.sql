@@ -1,5 +1,10 @@
+-- ESTE ARCHIVO BORRA TODAS LAS TABLAS. Sirve solo para crear un proyecto vacío.
+-- En la base que ya está en uso, NO lo ejecutes: se pierden nadadores, tiempos y usuarios.
+-- Para agregar el año de nacimiento en la base actual, ejecuta migracion_anio_nacimiento.sql.
+-- Para la fecha completa y el catálogo de grupos, ejecuta migracion_grupos_y_fecha.sql.
+--
 -- BORRADO PREVIO PARA EVITAR ERRORES (CASCADE borra las tablas que dependen de ellos)
-DROP TABLE IF EXISTS asistencias, tiempos, nadadores, marcas_minimas, usuarios, incidencias_clase, tests, resultados_test, datos_fisicos, tiempos_entrenamiento CASCADE;
+DROP TABLE IF EXISTS asistencias, tiempos, nadadores, grupos, marcas_minimas, usuarios, incidencias_clase, tests, resultados_test, datos_fisicos, tiempos_entrenamiento CASCADE;
 DROP TYPE IF EXISTS tipo_rol, tipo_sexo, tipo_estilo, tipo_categoria CASCADE;
 
 -- ==========================================
@@ -21,6 +26,7 @@ CREATE TYPE tipo_estilo AS ENUM (
 
 -- Nuevas Categorías solicitadas
 CREATE TYPE tipo_categoria AS ENUM (
+    'Infantil E', 'Infantil D', 'Infantil C',
     'Infantil A', 'Infantil B1', 'Infantil B2', 
     'Juvenil A1', 'Juvenil A2', 'Juvenil B', 'Mayores'
 );
@@ -33,7 +39,8 @@ CREATE TABLE usuarios (
     clave VARCHAR(255) NOT NULL, 
     rol tipo_rol DEFAULT 'Pendiente', 
     validado BOOLEAN DEFAULT false,
-    grupos_asignados TEXT[] DEFAULT '{}' 
+    grupos_asignados TEXT[] DEFAULT '{}',
+    id_nadador INTEGER
 );
 
 -- 2. Tabla de Nadadores
@@ -42,8 +49,20 @@ CREATE TABLE nadadores (
     nombre VARCHAR(100) NOT NULL,
     grupo VARCHAR(50), 
     categoria tipo_categoria NOT NULL,
-    sexo tipo_sexo DEFAULT 'Masculino'
+    sexo tipo_sexo DEFAULT 'Masculino',
+    anio_nacimiento INTEGER,
+    fecha_nacimiento DATE,
+    activo BOOLEAN DEFAULT true
 );
+
+CREATE TABLE grupos (
+    id SERIAL PRIMARY KEY,
+    nombre VARCHAR(50) UNIQUE NOT NULL
+);
+
+ALTER TABLE usuarios
+    ADD CONSTRAINT usuarios_id_nadador_fkey
+    FOREIGN KEY (id_nadador) REFERENCES nadadores(id) ON DELETE SET NULL;
 
 -- 3. Tabla de Tiempos
 CREATE TABLE tiempos (
@@ -64,7 +83,9 @@ CREATE TABLE asistencias (
     id SERIAL PRIMARY KEY,
     id_nadador INTEGER REFERENCES nadadores(id) ON DELETE CASCADE,
     fecha DATE NOT NULL,
-    estado VARCHAR(20) DEFAULT 'Ausente', 
+    estado VARCHAR(20) DEFAULT 'Ausente',
+    motivo VARCHAR(40),
+    observacion TEXT,
     UNIQUE(id_nadador, fecha) 
 );
 
