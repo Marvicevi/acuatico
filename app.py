@@ -126,8 +126,7 @@ def aplicar_categoria_en_memoria(df):
         if not fecha or fecha == "invalid":
             continue
         cat = categoria_por_anio_nacimiento(fecha.year)
-        if cat:
-            df.at[i, "categoria"] = cat
+        df.at[i, "categoria"] = cat if cat else None
     return df
 
 
@@ -1058,13 +1057,13 @@ def mostrar_dashboard():
         if nadador_seleccionado:
             nadador_row = nadadores_del_grupo[nadadores_del_grupo['nombre'] == nadador_seleccionado].iloc[0]
             id_nadador = nadador_row.get('id_nadador', nadador_row.get('id', None))
-            cat_actual = nadador_row['categoria']
+            cat_actual = nadador_row['categoria'] if pd.notna(nadador_row['categoria']) else ""
             _id_col_t = 'id_nadador' if 'id_nadador' in st.session_state.tiempos_df.columns else 'id'
             tiempos_nadador = st.session_state.tiempos_df[st.session_state.tiempos_df[_id_col_t] == id_nadador] if pd.notna(id_nadador) else st.session_state.tiempos_df.iloc[0:0]
             
             col1, col2 = st.columns([1.2, 1])
             with col1:
-                st.write(f"**Tiempos Registrados: {nadador_seleccionado} ({cat_actual})**")
+                st.write(f"**Tiempos Registrados: {nadador_seleccionado}" + (f" ({cat_actual})" if cat_actual else "") + "**")
                 if not tiempos_nadador.empty:
                     _disp = tiempos_nadador.copy()
                     _disp['Tiempo'] = _disp.apply(formatear_tiempo_con_icono, axis=1)
@@ -1304,7 +1303,8 @@ def mostrar_dashboard():
             st.warning("Tu cuenta todavía no está vinculada a un nadador. El administrador debe asignarte la ficha en Admin Usuarios.")
         else:
             yo = ficha.iloc[0]
-            st.subheader(f"{yo.get('nombre')} · {yo.get('categoria', '')}")
+            cat_yo = yo.get("categoria") or ""
+            st.subheader(f"{yo.get('nombre')} · {cat_yo}" if cat_yo else str(yo.get("nombre") or ""))
             tiempos_nadador = st.session_state.tiempos_df[st.session_state.tiempos_df["id_nadador"].map(_anio_entero) == id_nadador] if "id_nadador" in st.session_state.tiempos_df.columns else st.session_state.tiempos_df.iloc[0:0]
             st.subheader("Mis Tiempos Registrados")
             if not tiempos_nadador.empty:
@@ -2066,9 +2066,6 @@ def gestionar_nadadores():
                                 errores.append(f"{nombre}: el año {anio} no es válido.")
                                 continue
                             cat = categoria_por_anio_nacimiento(anio)
-                            if not cat:
-                                errores.append(f"{nombre}: esa fecha no entra en una categoría FECHIDA.")
-                                continue
                         rec = {
                             "nombre": nombre,
                             "sexo": sexo,
@@ -2076,7 +2073,7 @@ def gestionar_nadadores():
                             "grupo": grupo,
                             "activo": es_nadador_activo(row.get("activo")),
                         }
-                        if cat:
+                        if fecha is not None:
                             rec["categoria"] = cat
 
                         def _enviar(payload):

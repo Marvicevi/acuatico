@@ -49,7 +49,7 @@ CREATE TABLE nadadores (
     id SERIAL PRIMARY KEY,
     nombre VARCHAR(100) NOT NULL,
     grupo VARCHAR(50), 
-    categoria tipo_categoria NOT NULL,
+    categoria tipo_categoria,
     sexo tipo_sexo DEFAULT 'Masculino',
     fecha_nacimiento DATE,
     activo BOOLEAN DEFAULT true
