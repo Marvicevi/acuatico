@@ -40,7 +40,8 @@ CREATE TABLE usuarios (
     rol tipo_rol DEFAULT 'Pendiente', 
     validado BOOLEAN DEFAULT false,
     grupos_asignados TEXT[] DEFAULT '{}',
-    id_nadador INTEGER
+    id_nadador INTEGER,
+    debe_cambiar_clave BOOLEAN DEFAULT false
 );
 
 -- 2. Tabla de Nadadores

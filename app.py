@@ -619,6 +619,69 @@ def restaurar_usuario(token, usuarios_df):
     return user
 
 
+def cuenta_debe_cambiar_clave(user):
+    """Verdadero solo si la cuenta fue creada con clave temporal y aún no la cambió."""
+    if user is None:
+        return False
+    if not isinstance(user, dict) and hasattr(user, "to_dict"):
+        user = user.to_dict()
+    if not isinstance(user, dict):
+        return False
+    valor = user.get("debe_cambiar_clave")
+    if valor is None:
+        return False
+    try:
+        if pd.isna(valor):
+            return False
+    except (TypeError, ValueError):
+        pass
+    if isinstance(valor, str):
+        return valor.strip().lower() in {"true", "1", "t", "si", "sí", "yes"}
+    return bool(valor)
+
+
+def _aplicar_clave_en_sesion(uid, nueva):
+    df = st.session_state.usuarios_df
+    if df is not None and not df.empty and "id_usuario" in df.columns:
+        mask = df["id_usuario"].map(_anio_entero) == uid
+        df.loc[mask, "clave"] = nueva
+        if "debe_cambiar_clave" in df.columns:
+            df.loc[mask, "debe_cambiar_clave"] = False
+    info = st.session_state.user_info
+    if isinstance(info, dict):
+        info["clave"] = nueva
+        info["debe_cambiar_clave"] = False
+
+
+def guardar_clave_propia(nueva, repetida):
+    """La persona cambia su propia clave. No muestra la anterior."""
+    if not nueva:
+        return False, "Escribe la nueva contraseña."
+    if nueva != repetida:
+        return False, "Las dos contraseñas no coinciden."
+    info = st.session_state.user_info if isinstance(st.session_state.user_info, dict) else {}
+    if cuenta_debe_cambiar_clave(info) and nueva == info.get("clave"):
+        return False, "La contraseña nueva tiene que ser distinta de la temporal."
+    uid = _anio_entero(info.get("id_usuario"))
+    if uid is None:
+        return False, "No se encontró la cuenta para actualizar."
+    supabase = init_connection()
+    if supabase:
+        try:
+            supabase.table("usuarios").update(
+                {"clave": nueva, "debe_cambiar_clave": False}
+            ).eq("id", uid).execute()
+        except Exception as e:
+            if "debe_cambiar_clave" not in str(e):
+                return False, f"No se pudo cambiar la contraseña: {e}"
+            try:
+                supabase.table("usuarios").update({"clave": nueva}).eq("id", uid).execute()
+            except Exception as e2:
+                return False, f"No se pudo cambiar la contraseña: {e2}"
+    _aplicar_clave_en_sesion(uid, nueva)
+    return True, "Contraseña actualizada."
+
+
 # --- Configuración de la página ---
 st.set_page_config(
     page_title="Club de Natación Acuático Valdivia",
@@ -2310,6 +2373,7 @@ def panel_master():
             etiquetas_fichas[f"{ficha.get('nombre')} ({ficha.get('grupo') or 'sin grupo'}){marca}"] = id_ficha
 
     with st.expander("➕ Crear Nueva Cuenta", expanded=True):
+        st.caption("La contraseña que escribas es temporal. En el primer ingreso, esa persona tendrá que cambiarla.")
         with st.form("form_crear_usuario"):
             c1, c2 = st.columns(2)
             with c1:
@@ -2338,25 +2402,40 @@ def panel_master():
                                     "nombre": nuevo_nombre, "email": nuevo_email,
                                     "clave": nueva_clave, "rol": nuevo_rol, "validado": True,
                                     "grupos_asignados": nuevos_grupos,
+                                    "debe_cambiar_clave": True,
                                 }
                                 if nuevo_rol == "Nadador":
                                     rec_usuario["id_nadador"] = int(etiquetas_fichas[ficha_cuenta])
-                                try:
-                                    supabase.table("usuarios").insert(rec_usuario).execute()
-                                except Exception as e_ins:
-                                    if "id_nadador" in rec_usuario and "id_nadador" in str(e_ins):
-                                        rec_usuario.pop("id_nadador", None)
-                                        supabase.table("usuarios").insert(rec_usuario).execute()
-                                        st.warning("La cuenta se creó, pero la base todavía no puede vincular la ficha. Ejecuta migracion_activo_y_cuenta.sql.")
-                                    else:
-                                        raise
+                                pendiente = dict(rec_usuario)
+                                ultimo_error = None
+                                for _ in range(3):
+                                    try:
+                                        supabase.table("usuarios").insert(pendiente).execute()
+                                        ultimo_error = None
+                                        break
+                                    except Exception as e_ins:
+                                        ultimo_error = e_ins
+                                        mensaje = str(e_ins)
+                                        quito = False
+                                        for col in ("id_nadador", "debe_cambiar_clave"):
+                                            if col in pendiente and col in mensaje:
+                                                pendiente.pop(col, None)
+                                                quito = True
+                                        if not quito:
+                                            break
+                                if ultimo_error is not None:
+                                    raise ultimo_error
+                                if nuevo_rol == "Nadador" and "id_nadador" not in pendiente:
+                                    st.warning("La cuenta se creó, pero la base todavía no puede vincular la ficha. Ejecuta migracion_activo_y_cuenta.sql.")
+                                if "debe_cambiar_clave" not in pendiente:
+                                    st.warning("La cuenta se creó, pero esta base todavía no obliga a cambiar la contraseña en el primer ingreso. Ejecuta migracion_clave_inicial.sql.")
                                 fresco = supabase.table("usuarios").select("*").execute().data
                                 if fresco:
                                     u_df = pd.DataFrame(fresco)
                                     if "id" in u_df.columns:
                                         u_df = u_df.rename(columns={"id": "id_usuario"})
                                     st.session_state.usuarios_df = u_df
-                                st.success(f"¡Cuenta para {nuevo_nombre} creada! Ya le puedes enviar su correo y contraseña provisional.")
+                                st.success(f"¡Cuenta para {nuevo_nombre} creada! Envíale el correo y la contraseña temporal. Al entrar por primera vez tendrá que cambiarla.")
                             except Exception as e: st.error(f"Error BD: {e}")
                         else:
                             st.info("Prototipo local: Usuario creado temporalmente.")
@@ -2399,54 +2478,6 @@ def panel_master():
                     st.error(f"No se pudo vincular. Si la columna no existe, ejecuta migracion_activo_y_cuenta.sql. Detalle: {e}")
             else:
                 st.info("Prototipo local: el vínculo no se guarda en Supabase.")
-
-    st.markdown("---")
-    st.subheader("Cambiar contraseña")
-    st.write("El master puede reemplazar la clave de cualquier cuenta ya creada. La contraseña anterior deja de servir y no se muestra aquí.")
-    cuentas_clave = st.session_state.usuarios_df
-    if cuentas_clave is None or cuentas_clave.empty or "email" not in cuentas_clave.columns:
-        st.info("No hay cuentas para modificar.")
-    else:
-        opciones_clave = [
-            f"{row.get('nombre')} · {row.get('email')} · {row.get('rol')}"
-            for _, row in cuentas_clave.iterrows()
-        ]
-        with st.form("form_cambiar_clave_master"):
-            cuenta_clave = st.selectbox("Cuenta", opciones_clave)
-            clave_nueva = st.text_input("Nueva contraseña", type="password")
-            clave_repetida = st.text_input("Repite la nueva contraseña", type="password")
-            if st.form_submit_button("Guardar contraseña", type="primary"):
-                if not clave_nueva:
-                    st.error("Escribe la nueva contraseña.")
-                elif clave_nueva != clave_repetida:
-                    st.error("Las dos contraseñas no coinciden.")
-                else:
-                    fila_clave = cuentas_clave.iloc[opciones_clave.index(cuenta_clave)]
-                    uid_clave = _anio_entero(fila_clave.get("id_usuario"))
-                    if uid_clave is None:
-                        st.error("Esa cuenta no tiene un identificador para actualizar.")
-                    else:
-                        supabase = init_connection()
-                        if supabase:
-                            try:
-                                supabase.table("usuarios").update({"clave": clave_nueva}).eq("id", uid_clave).execute()
-                                fresco = supabase.table("usuarios").select("*").execute().data
-                                if fresco:
-                                    u_df = pd.DataFrame(fresco)
-                                    if "id" in u_df.columns:
-                                        u_df = u_df.rename(columns={"id": "id_usuario"})
-                                    st.session_state.usuarios_df = u_df
-                                if _anio_entero(st.session_state.user_info.get("id_usuario")) == uid_clave:
-                                    st.session_state.user_info["clave"] = clave_nueva
-                                st.success(f"La contraseña de {fila_clave.get('nombre')} quedó actualizada.")
-                            except Exception as e:
-                                st.error(f"No se pudo cambiar la contraseña: {e}")
-                        else:
-                            st.session_state.usuarios_df.loc[
-                                st.session_state.usuarios_df["id_usuario"].map(_anio_entero) == uid_clave,
-                                "clave",
-                            ] = clave_nueva
-                            st.success(f"Contraseña de {fila_clave.get('nombre')} actualizada en esta sesión.")
 
     st.markdown("---")
     st.subheader("Directorio de Usuarios Activos")
@@ -2669,6 +2700,7 @@ if not st.session_state.logged_in:
 
 # --- Contenido Principal (si el usuario está logueado) ---
 else:
+    pendiente_clave = cuenta_debe_cambiar_clave(st.session_state.user_info)
     # --- Menú de Navegación Condicional ---
     opciones_menu = ["📊 Dashboard"]
     if st.session_state.user_role in ['Entrenador', 'Directiva', 'Master']:
@@ -2689,42 +2721,60 @@ else:
         "🏁 Tests": mostrar_tests,
         "🛡️ Admin Usuarios": panel_master,
     }
-    solapas = st.tabs(opciones_menu)
     sincronizar_cookie_sesion(firmar_sesion(
         int(st.session_state.user_info["id_usuario"]), _secreto_sesion()
     ))
-    
-    # Botón de cerrar sesión en la barra lateral
+
     st.sidebar.image("logo.png", use_container_width=True)
     st.sidebar.success(f"{st.session_state.user_name} | {st.session_state.user_role}")
-    
+    correo_cuenta = ""
+    if isinstance(st.session_state.user_info, dict):
+        correo_cuenta = str(st.session_state.user_info.get("email") or "")
+    if correo_cuenta:
+        st.sidebar.caption(correo_cuenta)
+
     st.sidebar.markdown("---")
-    with st.sidebar.expander("⚙️ Mi Cuenta"):
-        nueva_pass = st.text_input("Nueva Contraseña", type="password", key="new_pass")
-        if st.checkbox("Cambiar Contraseña", key="chk_pass"):
-            if nueva_pass:
-                supabase = init_connection()
-                if supabase:
-                    try:
-                        uid = int(st.session_state.user_info['id_usuario'])
-                        supabase.table("usuarios").update({"clave": nueva_pass}).eq("id", uid).execute()
-                        st.success("Contraseña actualizada en BD.")
-                        st.session_state.user_info['clave'] = nueva_pass
-                    except Exception as e: st.error(f"Error BD: {e}")
-                else:
-                    st.success("Contraseña actualizada en modo local.")
-            else:
-                st.error("Escribe una contraseña válida.")
-                
-    st.sidebar.markdown("---")            
+    if not pendiente_clave:
+        if st.sidebar.button("Cambiar contraseña", use_container_width=True):
+            st.session_state.menu_cambiar_clave = not st.session_state.get("menu_cambiar_clave", False)
+        if st.session_state.get("menu_cambiar_clave"):
+            with st.sidebar.form("form_clave_menu"):
+                clave_menu = st.text_input("Nueva contraseña", type="password")
+                clave_menu_2 = st.text_input("Repite la nueva contraseña", type="password")
+                if st.form_submit_button("Guardar contraseña", type="primary"):
+                    ok_menu, msg_menu = guardar_clave_propia(clave_menu, clave_menu_2)
+                    if ok_menu:
+                        st.success(msg_menu)
+                    else:
+                        st.error(msg_menu)
+        st.sidebar.markdown("---")
     if st.sidebar.button("Cerrar Sesión", use_container_width=True):
         st.session_state.logged_in = False
         st.session_state.user_role = None
         st.session_state.user_name = None
         st.session_state.user_info = None
+        st.session_state.menu_cambiar_clave = False
         st.session_state.borrar_cookie = True
         st.rerun()
 
-    for solapa, nombre in zip(solapas, opciones_menu):
-        with solapa:
-            paginas[nombre]()
+    if pendiente_clave:
+        st.header("Cambia tu contraseña")
+        st.write(
+            f"{st.session_state.user_name}, esta cuenta es nueva. "
+            "Antes de continuar tienes que reemplazar la contraseña temporal. "
+            "La anterior no se muestra."
+        )
+        with st.form("form_clave_obligatoria"):
+            clave_obl = st.text_input("Nueva contraseña", type="password")
+            clave_obl_2 = st.text_input("Repite la nueva contraseña", type="password")
+            if st.form_submit_button("Guardar y entrar", type="primary"):
+                ok_obl, msg_obl = guardar_clave_propia(clave_obl, clave_obl_2)
+                if ok_obl:
+                    st.rerun()
+                else:
+                    st.error(msg_obl)
+    else:
+        solapas = st.tabs(opciones_menu)
+        for solapa, nombre in zip(solapas, opciones_menu):
+            with solapa:
+                paginas[nombre]()
