@@ -627,22 +627,28 @@ hide_streamlit_style = """
     .st-emotion-cache-18ni7ap {
         padding-top: 1rem;
     }
-    /* Solapas tipo carpeta: la abierta queda levantada y con sombra */
+    /* Solapas tipo carpeta. El primer grupo vale en local; el segundo, en la app publicada. */
     .block-container {
         padding-bottom: 4.5rem;
     }
     p, .stCaption, [data-testid="stMarkdown"] {
         overflow-wrap: break-word;
     }
-    .stTabs [data-baseweb="tab-list"] {
+    .stTabs [data-baseweb="tab-list"],
+    .stTabs [role="tablist"] {
         gap: 6px;
         border-bottom: 2px solid #c5d4e8;
         padding-top: 8px;
         overflow-x: auto;
         flex-wrap: nowrap;
     }
-    .stTabs [data-baseweb="tab"] {
+    .stTabs [role="tablist"]::after {
+        display: none !important;
+    }
+    .stTabs [data-baseweb="tab"],
+    .stTabs [role="tab"] {
         margin-top: 8px;
+        height: auto !important;
         border-radius: 14px 14px 0 0 !important;
         border: 1px solid #d5deea !important;
         border-bottom: none !important;
@@ -653,7 +659,13 @@ hide_streamlit_style = """
         white-space: nowrap;
         flex: 0 0 auto;
     }
-    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+    .stTabs [role="tab"] p {
+        color: #3d4d63 !important;
+        font-weight: 500 !important;
+    }
+    .stTabs [data-baseweb="tab"][aria-selected="true"],
+    .stTabs [role="tab"][aria-selected="true"],
+    .stTabs [role="tab"][data-selected] {
         margin-top: 0;
         background: #ffffff !important;
         color: #0b4f9c !important;
@@ -663,10 +675,18 @@ hide_streamlit_style = """
         position: relative;
         z-index: 2;
     }
-    .stTabs [data-baseweb="tab-highlight"] {
-        background-color: transparent !important;
+    .stTabs [role="tab"][aria-selected="true"] p,
+    .stTabs [role="tab"][data-selected] p {
+        color: #0b4f9c !important;
+        font-weight: 700 !important;
     }
-    .stTabs [data-baseweb="tab-panel"] {
+    .stTabs [data-baseweb="tab-highlight"],
+    .stTabs .react-aria-SelectionIndicator {
+        background-color: transparent !important;
+        display: none !important;
+    }
+    .stTabs [data-baseweb="tab-panel"],
+    .stTabs [role="tabpanel"] {
         background: #ffffff;
         border: 1px solid #d5deea;
         border-top: none;
@@ -686,7 +706,8 @@ hide_streamlit_style = """
         }
         h1 { font-size: 1.45rem !important; }
         h2 { font-size: 1.2rem !important; }
-        .stTabs [data-baseweb="tab"] {
+        .stTabs [data-baseweb="tab"],
+        .stTabs [role="tab"] {
             padding: 0.4rem 0.55rem !important;
             font-size: 0.78rem !important;
         }
