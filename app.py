@@ -591,18 +591,77 @@ def leer_sesion(token, secreto, ahora=None):
     return uid
 
 
+def _token_de_url():
+    try:
+        valor = st.query_params.get("sesion", "")
+    except Exception:
+        return ""
+    if isinstance(valor, (list, tuple)):
+        valor = valor[-1] if valor else ""
+    return str(valor or "")
+
+
+def _token_de_cookie():
+    try:
+        return str(st.context.cookies.get("acuatico_sesion", "") or "")
+    except Exception:
+        return ""
+
+
 def sincronizar_cookie_sesion(token="", borrar=False):
-    import streamlit.components.v1 as components
+    try:
+        import streamlit.components.v1 as components
+    except Exception:
+        return
     max_age = 0 if borrar else 14 * 24 * 3600
-    components.html(
-        f"""<script>
-        try {{
-          window.parent.document.cookie = "acuatico_sesion={token}; path=/; max-age={max_age}; SameSite=Lax";
-        }} catch (e) {{}}
-        </script>""",
-        height=0,
-        width=0,
-    )
+    valor = "" if borrar else str(token)
+    try:
+        components.html(
+            f"""<script>
+            (function () {{
+              var valor = "acuatico_sesion=" + encodeURIComponent({valor!r});
+              var extra = "; path=/; max-age={max_age}; SameSite=Lax";
+              var proto = "http:";
+              try {{ proto = window.parent.location.protocol; }} catch (e) {{
+                try {{ proto = location.protocol; }} catch (e2) {{}}
+              }}
+              if (proto === "https:") extra += "; Secure";
+              var cookie = valor + extra;
+              try {{ document.cookie = cookie; }} catch (e) {{}}
+              try {{ window.parent.document.cookie = cookie; }} catch (e) {{}}
+            }})();
+            </script>""",
+            height=0,
+            width=0,
+        )
+    except Exception:
+        return
+
+
+def anclar_sesion(id_usuario):
+    """Deja el ingreso en la dirección de la página para que recargar no cierre la sesión."""
+    uid = _anio_entero(id_usuario)
+    if uid is None:
+        return ""
+    secreto = _secreto_sesion()
+    actual = _token_de_url()
+    if leer_sesion(actual, secreto) != uid:
+        actual = firmar_sesion(uid, secreto)
+        try:
+            st.query_params["sesion"] = actual
+        except Exception:
+            pass
+    sincronizar_cookie_sesion(actual)
+    return actual
+
+
+def cerrar_sesion_guardada():
+    sincronizar_cookie_sesion(borrar=True)
+    try:
+        if "sesion" in st.query_params:
+            del st.query_params["sesion"]
+    except Exception:
+        pass
 
 
 def restaurar_usuario(token, usuarios_df):
@@ -614,7 +673,11 @@ def restaurar_usuario(token, usuarios_df):
     if match.empty:
         return None
     user = match.iloc[0]
-    if not (bool(user.get("validado")) or user.get("rol") == "Master"):
+    try:
+        autorizado = bool(user.get("validado")) or user.get("rol") == "Master"
+    except Exception:
+        autorizado = user.get("rol") == "Master"
+    if not autorizado:
         return None
     return user
 
@@ -2645,11 +2708,16 @@ if 'logged_in' not in st.session_state:
     st.session_state.datos_fisicos_df     = datos_fisicos_df
     st.session_state.tiempos_ent_df       = tiempos_ent_df
     st.session_state.grupos_df            = grupos_df
-    try:
-        token_guardado = st.context.cookies.get("acuatico_sesion", "")
-    except Exception:
-        token_guardado = ""
-    usuario_previo = restaurar_usuario(token_guardado, st.session_state.usuarios_df)
+    token_url = _token_de_url()
+    token_cookie = _token_de_cookie()
+    usuario_previo = restaurar_usuario(token_url, st.session_state.usuarios_df) if token_url else None
+    if usuario_previo is None and token_cookie and token_cookie != token_url:
+        usuario_previo = restaurar_usuario(token_cookie, st.session_state.usuarios_df)
+    if usuario_previo is None and token_url:
+        try:
+            del st.query_params["sesion"]
+        except Exception:
+            pass
     if usuario_previo is not None:
         st.session_state.logged_in = True
         st.session_state.user_role = usuario_previo["rol"]
@@ -2658,7 +2726,7 @@ if 'logged_in' not in st.session_state:
 
 # --- Pantalla de Login ---
 if st.session_state.pop("borrar_cookie", False):
-    sincronizar_cookie_sesion(borrar=True)
+    cerrar_sesion_guardada()
 
 if not st.session_state.logged_in:
     col1, col2 = st.columns([1, 5])
@@ -2689,7 +2757,7 @@ if not st.session_state.logged_in:
                     st.session_state.user_role = user_info['rol']
                     st.session_state.user_name = user_info['nombre']
                     st.session_state.user_info = user_info.to_dict()
-                    sincronizar_cookie_sesion(firmar_sesion(int(user_info["id_usuario"]), _secreto_sesion()))
+                    anclar_sesion(user_info["id_usuario"])
                     st.rerun()
                 else:
                     st.error("Tu perfil aún no ha sido validado.")
@@ -2721,9 +2789,7 @@ else:
         "🏁 Tests": mostrar_tests,
         "🛡️ Admin Usuarios": panel_master,
     }
-    sincronizar_cookie_sesion(firmar_sesion(
-        int(st.session_state.user_info["id_usuario"]), _secreto_sesion()
-    ))
+    anclar_sesion(st.session_state.user_info.get("id_usuario"))
 
     st.sidebar.image("logo.png", use_container_width=True)
     st.sidebar.success(f"{st.session_state.user_name} | {st.session_state.user_role}")
@@ -2755,6 +2821,7 @@ else:
         st.session_state.user_info = None
         st.session_state.menu_cambiar_clave = False
         st.session_state.borrar_cookie = True
+        cerrar_sesion_guardada()
         st.rerun()
 
     if pendiente_clave:
