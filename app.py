@@ -12,6 +12,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
+from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder
 try:
     from supabase import create_client, Client
 except ImportError:
@@ -377,6 +378,111 @@ def presentacion_perfiles(df, solo_lectura):
     return df.style.apply(pintar, axis=0)
 
 
+TEXTO_TABLA_PERFILES = {
+    "filterOoo": "Filtrar...",
+    "contains": "Contiene",
+    "notContains": "No contiene",
+    "equals": "Igual a",
+    "notEqual": "Distinto de",
+    "startsWith": "Empieza con",
+    "endsWith": "Termina con",
+    "blank": "Vacío",
+    "notBlank": "Con dato",
+    "andCondition": "Y",
+    "orCondition": "O",
+    "applyFilter": "Aplicar",
+    "resetFilter": "Restablecer",
+    "clearFilter": "Limpiar",
+    "cancelFilter": "Cancelar",
+    "sortAscending": "Ordenar A → Z",
+    "sortDescending": "Ordenar Z → A",
+    "sortUnSort": "Quitar orden",
+    "empty": "Elegir",
+}
+
+
+def grilla_perfiles(df, opciones_grupo, puede_editar, clave):
+    """Tabla con filtro y orden en cada encabezado. No borra las filas ocultas."""
+    trabajo = df.copy()
+    trabajo["id_nadador"] = trabajo["id_nadador"].map(
+        lambda v: "" if _anio_entero(v) is None else str(_anio_entero(v))
+    )
+    for col in ("nombre", "fecha_nacimiento", "edad", "categoria", "grupo", "sexo"):
+        trabajo[col] = trabajo[col].map(lambda v: "" if not _texto_limpio(v) else _texto_limpio(v))
+    trabajo["activo"] = trabajo["activo"].map(lambda v: bool(es_nadador_activo(v)))
+    color_editable = COLOR_CELDA_EDITABLE if puede_editar else COLOR_CELDA_BLOQUEADA
+    gb = GridOptionsBuilder.from_dataframe(trabajo)
+    gb.configure_default_column(
+        filter=True,
+        sortable=True,
+        resizable=True,
+        editable=puede_editar,
+        suppressMenuHide=True,
+        floatingFilter=False,
+        minWidth=88,
+        flex=1,
+    )
+    gb.configure_column("nombre", header_name="Nombre", flex=2, minWidth=160, cellStyle={"backgroundColor": color_editable})
+    gb.configure_column("fecha_nacimiento", header_name="Fecha de nacimiento", minWidth=130, cellStyle={"backgroundColor": color_editable})
+    gb.configure_column("edad", header_name="Edad", editable=False, minWidth=72, cellStyle={"backgroundColor": COLOR_CELDA_BLOQUEADA})
+    gb.configure_column("categoria", header_name="Categoría", editable=False, minWidth=120, cellStyle={"backgroundColor": COLOR_CELDA_BLOQUEADA})
+    gb.configure_column(
+        "grupo",
+        header_name="Grupo",
+        editable=puede_editar,
+        cellEditor="agSelectCellEditor",
+        cellEditorParams={"values": [g for g in opciones_grupo if g]},
+        cellStyle={"backgroundColor": color_editable},
+    )
+    gb.configure_column(
+        "sexo",
+        header_name="Sexo",
+        editable=puede_editar,
+        cellEditor="agSelectCellEditor",
+        cellEditorParams={"values": ["Femenino", "Masculino"]},
+        cellStyle={"backgroundColor": color_editable},
+    )
+    gb.configure_column(
+        "activo",
+        header_name="Activo",
+        editable=puede_editar,
+        cellRenderer="agCheckboxCellRenderer",
+        cellEditor="agCheckboxCellEditor",
+        cellStyle={"backgroundColor": color_editable},
+        minWidth=110,
+    )
+    gb.configure_column("id_nadador", hide=True)
+    gb.configure_grid_options(
+        localeText=TEXTO_TABLA_PERFILES,
+        stopEditingWhenCellsLoseFocus=True,
+        singleClickEdit=True,
+        accentedSort=True,
+        animateRows=False,
+        headerHeight=42,
+        rowHeight=36,
+        autoSizeStrategy={"type": "fitGridWidth"},
+    )
+    alto = min(680, 110 + 36 * max(len(trabajo), 6))
+    respuesta = AgGrid(
+        trabajo,
+        gridOptions=gb.build(),
+        height=alto,
+        data_return_mode=DataReturnMode.AS_INPUT,
+        update_on=["cellValueChanged"],
+        server_sync_strategy="client_wins",
+        theme="streamlit",
+        show_toolbar=False,
+        show_search=False,
+        show_download_button=False,
+        enable_enterprise_modules=False,
+        key=clave,
+    )
+    datos = getattr(respuesta, "data", None)
+    if not isinstance(datos, pd.DataFrame):
+        return trabajo
+    return datos
+
+
 def es_cumpleanos(fecha_nacimiento, fecha_clase):
     """El día y el mes de la clase coinciden con el nacimiento. El año no importa."""
     fecha = parse_fecha_nacimiento(fecha_nacimiento)
@@ -450,57 +556,6 @@ def lista_grupos():
         st.session_state.get("grupos_df"),
         st.session_state.get("nadadores_df"),
     )
-
-
-def filtrar_y_ordenar_perfiles(df, nombre="", sexo="Todos", grupo="Todos", categoria="Todas", activo="Todos", orden="Nombre", descendente=False):
-    """Deja visible solo el recorte pedido y lo ordena. No borra fichas."""
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-    busqueda = _texto_limpio(nombre).lower()
-    if busqueda and "nombre" in out.columns:
-        out = out[out["nombre"].map(lambda n: busqueda in _texto_limpio(n).lower())]
-    if sexo != "Todos" and "sexo" in out.columns:
-        out = out[out["sexo"].map(_texto_limpio) == sexo]
-    if grupo != "Todos" and "grupo" in out.columns:
-        out = out[out["grupo"].map(_texto_limpio) == grupo]
-    if categoria != "Todas" and "categoria" in out.columns:
-        if categoria == "Sin categoría":
-            out = out[out["categoria"].map(lambda c: not _texto_limpio(c))]
-        else:
-            out = out[out["categoria"].map(_texto_limpio) == categoria]
-    if activo == "Activos" and "activo" in out.columns:
-        out = out[out["activo"].map(es_nadador_activo)]
-    elif activo == "Inactivos" and "activo" in out.columns:
-        out = out[~out["activo"].map(es_nadador_activo)]
-    if out.empty:
-        return out.reset_index(drop=True)
-    columnas = {
-        "Nombre": "nombre",
-        "Fecha de nacimiento": "fecha_nacimiento",
-        "Edad": "edad",
-        "Categoría": "categoria",
-        "Grupo": "grupo",
-        "Sexo": "sexo",
-    }
-    col = columnas.get(orden, "nombre")
-    if col not in out.columns:
-        return out.reset_index(drop=True)
-    if col == "fecha_nacimiento":
-        def _clave_fecha(valor):
-            fecha = parse_fecha_nacimiento(valor)
-            if not fecha or fecha == "invalid":
-                return None
-            return fecha
-        clave = out[col].map(_clave_fecha)
-    elif col == "edad":
-        clave = pd.to_numeric(out[col], errors="coerce")
-    else:
-        clave = out[col].map(lambda v: _texto_limpio(v).lower())
-    out = out.assign(_orden_perfil=clave).sort_values(
-        "_orden_perfil", ascending=not descendente, kind="mergesort", na_position="last"
-    )
-    return out.drop(columns=["_orden_perfil"]).reset_index(drop=True)
 
 
 def es_nadador_activo(valor):
@@ -1917,10 +1972,10 @@ def gestionar_nadadores():
             if faltan_fecha:
                 st.warning("Faltan nadadores con fecha de nacimiento: " + ", ".join(faltan_fecha))
         if puede_editar_fichas:
-            st.write("Edita el nombre, la fecha de nacimiento, el grupo, el sexo y Activo. La edad y la categoría no cambian hasta que aprietas Guardar perfiles. El fondo gris indica que esa celda no se edita.")
+            st.write("Edita el nombre, la fecha, el grupo, el sexo y Activo. La edad y la categoría quedan en gris y se calculan al apretar Guardar perfiles.")
         else:
             st.info("La directiva ve las fichas y puede cambiar los nombres de los grupos en Configurar grupos. El nombre y la fecha los editan el entrenador y el master.")
-        st.caption("La fecha se escribe DD/MM/AAAA. Al guardar, la edad es la cumplida al 31 de diciembre y con ella se asigna la categoría. Sin fecha, la edad y la categoría quedan vacías. Desmarca Activo para ocultar a quien ya no viene: la ficha no se borra, y eso también se aplica al guardar. Si ya modificaste celdas, guárdalas antes de filtrar u ordenar.")
+        st.caption("La fecha se escribe DD/MM/AAAA. En el encabezado de cada columna puedes ordenar, con un clic, y filtrar desde su menú, como en Excel. Lo que ocultas no se borra. Termina la celda antes de guardar.")
         if st.session_state.pop("perfil_guardado", False):
             st.success("Guardado. La categoría quedó calculada con la fecha de nacimiento.")
         df = st.session_state.nadadores_df.copy()
@@ -1948,90 +2003,40 @@ def gestionar_nadadores():
         if "" not in opciones_grupo:
             opciones_grupo = [""] + opciones_grupo
         total_perfiles = len(df)
-        categorias_filtro = ["Todas", "Sin categoría"]
-        for cat_filtro in df["categoria"].map(_texto_limpio).tolist():
-            if cat_filtro and cat_filtro not in categorias_filtro:
-                categorias_filtro.append(cat_filtro)
-        grupos_filtro = ["Todos"] + [g for g in opciones_grupo if g]
-        f1, f2, f3 = st.columns(3)
-        with f1:
-            filtro_nombre = st.text_input("Buscar nombre", key="filtro_perfil_nombre")
-        with f2:
-            filtro_sexo = st.selectbox("Sexo", ["Todos", "Femenino", "Masculino"], key="filtro_perfil_sexo")
-        with f3:
-            filtro_grupo = st.selectbox("Grupo", grupos_filtro, key="filtro_perfil_grupo")
-        f4, f5, f6 = st.columns(3)
-        with f4:
-            filtro_categoria = st.selectbox("Categoría", categorias_filtro, key="filtro_perfil_categoria")
-        with f5:
-            filtro_activo = st.selectbox("Activo", ["Todos", "Activos", "Inactivos"], key="filtro_perfil_activo")
-        with f6:
-            filtro_orden = st.selectbox(
-                "Ordenar por",
-                ["Nombre", "Fecha de nacimiento", "Edad", "Categoría", "Grupo", "Sexo"],
-                key="filtro_perfil_orden",
-            )
-        orden_desc = st.selectbox("Dirección", ["A → Z", "Z → A"], key="filtro_perfil_direccion") == "Z → A"
-        df = filtrar_y_ordenar_perfiles(
-            df,
-            nombre=filtro_nombre,
-            sexo=filtro_sexo,
-            grupo=filtro_grupo,
-            categoria=filtro_categoria,
-            activo=filtro_activo,
-            orden=filtro_orden,
-            descendente=orden_desc,
-        )
-        st.caption(f"Se ven {len(df)} de {total_perfiles} nadadores. El filtro no borra a los que quedan ocultos.")
-        clave_editor = "editor_perfiles_" + hashlib.md5(
-            "|".join([
-                _texto_limpio(filtro_nombre).lower(),
-                filtro_sexo,
-                filtro_grupo,
-                filtro_categoria,
-                filtro_activo,
-                filtro_orden,
-                "desc" if orden_desc else "asc",
-            ]).encode()
-        ).hexdigest()[:10]
-        config_perfiles = {
-            "id_nadador": None,
-            "nombre": st.column_config.TextColumn("Nombre"),
-            "fecha_nacimiento": st.column_config.TextColumn(
-                "Fecha de nacimiento", help="DD/MM/AAAA"
-            ),
-            "edad": st.column_config.TextColumn(
-                "Edad", disabled=True,
-                help="Se calcula al guardar, con la edad cumplida al 31 de diciembre."
-            ),
-            "categoria": st.column_config.TextColumn("Categoría", disabled=True),
-            "grupo": st.column_config.SelectboxColumn("Grupo", options=opciones_grupo, required=True),
-            "sexo": st.column_config.SelectboxColumn(
-                "Sexo", options=["Femenino", "Masculino"], required=True
-            ),
-            "activo": st.column_config.CheckboxColumn("Activo", default=True),
-        }
+        borrador = st.session_state.pop("perfiles_borrador", None)
+        if isinstance(borrador, pd.DataFrame):
+            for col in columnas_editor:
+                if col not in borrador.columns:
+                    borrador[col] = True if col == "activo" else ""
+            df = borrador[columnas_editor].copy()
+        generacion = int(st.session_state.get("perfiles_grid_gen", 0))
+        clave_editor = f"editor_perfiles_{generacion}"
         if df.empty:
-            st.info("Ningún nadador coincide con ese filtro.")
+            st.info("Todavía no hay nadadores.")
             edited_df = df
-            guardar_perfiles = False
-        elif puede_editar_fichas:
-            with st.form("form_perfiles"):
-                edited_df = st.data_editor(
-                    presentacion_perfiles(df, solo_lectura=False),
-                    use_container_width=True, num_rows="dynamic",
-                    key=clave_editor,
-                    column_config=config_perfiles,
-                )
-                guardar_perfiles = st.form_submit_button("Guardar perfiles", type="primary")
         else:
-            edited_df = st.data_editor(
-                presentacion_perfiles(df, solo_lectura=True),
-                use_container_width=True, num_rows="fixed",
-                disabled=True,
-                key="editor_perfiles_lectura",
-                column_config=config_perfiles,
-            )
+            edited_df = grilla_perfiles(df, opciones_grupo, puede_editar_fichas, clave_editor)
+        agregar_nadador = False
+        guardar_perfiles = False
+        if puede_editar_fichas:
+            col_agregar, col_guardar = st.columns(2)
+            with col_agregar:
+                agregar_nadador = st.button("Agregar nadador", key="agregar_nadador")
+            with col_guardar:
+                guardar_perfiles = st.button("Guardar perfiles", type="primary", key="guardar_perfiles")
+        if agregar_nadador:
+            base = edited_df.copy() if isinstance(edited_df, pd.DataFrame) else df.copy()
+            for col in columnas_editor:
+                if col not in base.columns:
+                    base[col] = ""
+            base = base[columnas_editor]
+            fila = {col: "" for col in columnas_editor}
+            fila["activo"] = True
+            st.session_state.perfiles_borrador = pd.concat([base, pd.DataFrame([fila])], ignore_index=True)
+            st.session_state.perfiles_grid_gen = generacion + 1
+            st.rerun()
+        if guardar_perfiles and total_perfiles and (not isinstance(edited_df, pd.DataFrame) or edited_df.empty):
+            st.error("No pude leer la tabla. No se guardó nada.")
             guardar_perfiles = False
         if guardar_perfiles:
             supabase = init_connection()
@@ -2119,6 +2124,7 @@ def gestionar_nadadores():
                         st.error("No se guardaron algunas filas: " + " | ".join(errores))
                     elif not falta_columna:
                         st.session_state.perfil_guardado = True
+                        st.session_state.perfiles_grid_gen = generacion + 1
                         st.session_state.pop(clave_editor, None)
                         st.rerun()
                 except Exception as e:
@@ -2143,8 +2149,10 @@ def gestionar_nadadores():
                         for f, cat in zip(fechas, editado["categoria"])
                     ]
                     st.session_state.nadadores_df = aplicar_categoria_en_memoria(editado)
+                    st.session_state.perfiles_grid_gen = generacion + 1
                     st.session_state.pop(clave_editor, None)
-                    st.success("Perfiles guardados en el Prototipo Temporal.")
+                    st.session_state.perfil_guardado = True
+                    st.rerun()
 
     with tp2:
         st.write("Registra y visualiza la evolución física de cada nadador. Incluye medidas clave para el rendimiento en natación.")
