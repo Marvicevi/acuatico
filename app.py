@@ -2401,6 +2401,54 @@ def panel_master():
                 st.info("Prototipo local: el vínculo no se guarda en Supabase.")
 
     st.markdown("---")
+    st.subheader("Cambiar contraseña")
+    st.write("El master puede reemplazar la clave de cualquier cuenta ya creada. La contraseña anterior deja de servir y no se muestra aquí.")
+    cuentas_clave = st.session_state.usuarios_df
+    if cuentas_clave is None or cuentas_clave.empty or "email" not in cuentas_clave.columns:
+        st.info("No hay cuentas para modificar.")
+    else:
+        opciones_clave = [
+            f"{row.get('nombre')} · {row.get('email')} · {row.get('rol')}"
+            for _, row in cuentas_clave.iterrows()
+        ]
+        with st.form("form_cambiar_clave_master"):
+            cuenta_clave = st.selectbox("Cuenta", opciones_clave)
+            clave_nueva = st.text_input("Nueva contraseña", type="password")
+            clave_repetida = st.text_input("Repite la nueva contraseña", type="password")
+            if st.form_submit_button("Guardar contraseña", type="primary"):
+                if not clave_nueva:
+                    st.error("Escribe la nueva contraseña.")
+                elif clave_nueva != clave_repetida:
+                    st.error("Las dos contraseñas no coinciden.")
+                else:
+                    fila_clave = cuentas_clave.iloc[opciones_clave.index(cuenta_clave)]
+                    uid_clave = _anio_entero(fila_clave.get("id_usuario"))
+                    if uid_clave is None:
+                        st.error("Esa cuenta no tiene un identificador para actualizar.")
+                    else:
+                        supabase = init_connection()
+                        if supabase:
+                            try:
+                                supabase.table("usuarios").update({"clave": clave_nueva}).eq("id", uid_clave).execute()
+                                fresco = supabase.table("usuarios").select("*").execute().data
+                                if fresco:
+                                    u_df = pd.DataFrame(fresco)
+                                    if "id" in u_df.columns:
+                                        u_df = u_df.rename(columns={"id": "id_usuario"})
+                                    st.session_state.usuarios_df = u_df
+                                if _anio_entero(st.session_state.user_info.get("id_usuario")) == uid_clave:
+                                    st.session_state.user_info["clave"] = clave_nueva
+                                st.success(f"La contraseña de {fila_clave.get('nombre')} quedó actualizada.")
+                            except Exception as e:
+                                st.error(f"No se pudo cambiar la contraseña: {e}")
+                        else:
+                            st.session_state.usuarios_df.loc[
+                                st.session_state.usuarios_df["id_usuario"].map(_anio_entero) == uid_clave,
+                                "clave",
+                            ] = clave_nueva
+                            st.success(f"Contraseña de {fila_clave.get('nombre')} actualizada en esta sesión.")
+
+    st.markdown("---")
     st.subheader("Directorio de Usuarios Activos")
     directorio = st.session_state.usuarios_df.copy()
     try:
