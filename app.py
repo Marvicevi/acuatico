@@ -52,12 +52,8 @@ def segundos_a_tiempo(secs):
         return str(secs)
 
 
-# Temporada en la que las categorías ya guardadas son válidas.
-# La edad FECHIDA es la cumplida al 31 de diciembre: año de temporada − año de nacimiento.
-# 2026 − 11 = 2015 para Infantil A. No usar 2011: en 2026 ese año es Juvenil A2 (15 años).
-ANIO_DE_CATEGORIAS_GUARDADAS = 2026
-
-# (edad desde, edad hasta, categoría). Juvenil A1 = 14 y Juvenil A2 = 15.
+# (edad desde, edad hasta, categoría). La edad es la cumplida al 31 de diciembre.
+# Juvenil A1 = 14 y Juvenil A2 = 15.
 TRAMOS_CATEGORIA = [
     (8, 8, "Infantil E"),
     (9, 9, "Infantil D"),
@@ -70,18 +66,6 @@ TRAMOS_CATEGORIA = [
     (16, 18, "Juvenil B"),
     (19, 120, "Mayores"),
 ]
-
-# Solo estas categorías permiten deducir un único año. Juvenil B y Mayores abarcan varios.
-EDAD_UNICA_POR_CATEGORIA = {
-    "Infantil E": 8,
-    "Infantil D": 9,
-    "Infantil C": 10,
-    "Infantil A": 11,
-    "Infantil B1": 12,
-    "Infantil B2": 13,
-    "Juvenil A1": 14,
-    "Juvenil A2": 15,
-}
 
 
 def _anio_entero(valor):
@@ -132,60 +116,19 @@ def categoria_por_anio_nacimiento(anio_nacimiento, anio_temporada=None):
     return None
 
 
-def anio_nacimiento_por_categoria(categoria, anio_referencia=None):
-    """Año de nacimiento deducido de una categoría de una sola edad. None si abarca varias."""
-    edad = EDAD_UNICA_POR_CATEGORIA.get(str(categoria or "").strip())
-    if edad is None:
-        return None
-    return int(anio_referencia or ANIO_DE_CATEGORIAS_GUARDADAS) - edad
-
-
 def aplicar_categoria_en_memoria(df):
-    """Recalcula la categoría en la copia local cuando el año de nacimiento ya está guardado."""
-    if df is None or df.empty or "anio_nacimiento" not in df.columns:
+    """Ajusta la categoría de la copia local solo cuando la fecha de nacimiento ya está guardada."""
+    if df is None or df.empty or "fecha_nacimiento" not in df.columns:
         return df
     df = df.copy()
     for i, row in df.iterrows():
-        cat = categoria_por_anio_nacimiento(row.get("anio_nacimiento"))
+        fecha = parse_fecha_nacimiento(row.get("fecha_nacimiento"))
+        if not fecha or fecha == "invalid":
+            continue
+        cat = categoria_por_anio_nacimiento(fecha.year)
         if cat:
             df.at[i, "categoria"] = cat
     return df
-
-
-def sugerir_anios_nacimiento(df):
-    """Completa en pantalla el año que falta, solo si la categoría actual es de una sola edad."""
-    df = df.copy()
-    if "anio_nacimiento" not in df.columns:
-        df["anio_nacimiento"] = pd.NA
-    for i, row in df.iterrows():
-        if _anio_entero(row.get("anio_nacimiento")) is None:
-            sugerido = anio_nacimiento_por_categoria(row.get("categoria"))
-            if sugerido is not None:
-                df.at[i, "anio_nacimiento"] = sugerido
-        cat = categoria_por_anio_nacimiento(df.at[i, "anio_nacimiento"])
-        if cat:
-            df.at[i, "categoria"] = cat
-    return df
-
-
-def sincronizar_categorias_calculadas(supabase, df):
-    """Escribe la categoría calculada solo si ya hay año guardado y el texto cambió. No borra filas."""
-    if supabase is None or df is None or df.empty or "anio_nacimiento" not in df.columns:
-        return
-    if "id_nadador" not in df.columns:
-        return
-    for _, row in df.iterrows():
-        anio = _anio_entero(row.get("anio_nacimiento"))
-        id_nad = _anio_entero(row.get("id_nadador"))
-        if anio is None or id_nad is None:
-            continue
-        cat = categoria_por_anio_nacimiento(anio)
-        if not cat or cat == row.get("categoria"):
-            continue
-        try:
-            supabase.table("nadadores").update({"categoria": cat}).eq("id", id_nad).execute()
-        except Exception:
-            continue
 
 
 _ALIAS_COLUMNAS_MARCA = {
@@ -418,28 +361,6 @@ def con_edad_y_categoria(df):
     df["edad"] = edades
     df["categoria"] = categorias
     return df
-
-
-def _proyectar_ediciones_perfiles(df, estado):
-    """Aplica lo que ya se escribió en el editor para recalcular edad y categoría."""
-    if not isinstance(estado, dict):
-        return df
-    out = df.copy()
-    for idx, cambios in (estado.get("edited_rows") or {}).items():
-        if isinstance(cambios, dict):
-            cambios.pop("edad", None)
-            cambios.pop("categoria", None)
-        i = int(idx)
-        if i < 0 or i >= len(out):
-            continue
-        for col, valor in cambios.items():
-            if col in out.columns and col not in ("edad", "categoria", "id_nadador"):
-                out.iat[i, out.columns.get_loc(col)] = valor
-    for fila in estado.get("added_rows") or []:
-        edad, cat = valores_calculados_de_nacimiento(fila.get("fecha_nacimiento"))
-        fila["edad"] = "" if edad is None else str(edad)
-        fila["categoria"] = cat or ""
-    return out
 
 
 COLOR_CELDA_EDITABLE = "#ffffff"
@@ -947,7 +868,7 @@ def cargar_datos():
             mar = supabase.table("marcas_minimas").select("*").execute().data
 
             u_df = pd.DataFrame(usu) if usu else pd.DataFrame(columns=['id', 'nombre', 'email', 'rol', 'validado', 'grupos_asignados', 'clave'])
-            n_df = pd.DataFrame(nad) if nad else pd.DataFrame(columns=['id', 'nombre', 'grupo', 'categoria', 'sexo', 'anio_nacimiento'])
+            n_df = pd.DataFrame(nad) if nad else pd.DataFrame(columns=['id', 'nombre', 'grupo', 'categoria', 'sexo', 'fecha_nacimiento'])
             t_df = pd.DataFrame(tie) if tie else pd.DataFrame(columns=['id', 'id_nadador', 'fecha', 'lugar', 'estilo', 'tiempo_formateado', 'segundos_totales', 'tipo_piscina'])
             m_df = pd.DataFrame(mar) if mar else pd.DataFrame(columns=['categoria', 'estilo', 'sexo', 'segundos'])
 
@@ -969,7 +890,6 @@ def cargar_datos():
                     n_df = n_df.rename(columns={'id': 'id_nadador'})
                 elif 'id_nadador' not in n_df.columns:
                     n_df.insert(0, 'id_nadador', range(1, len(n_df) + 1))
-                sincronizar_categorias_calculadas(supabase, n_df)
                 n_df = aplicar_categoria_en_memoria(n_df)
 
             # Normalizar columnas de tiempos
@@ -996,10 +916,10 @@ def cargar_datos():
 
     # --- FALLBACK DE PROTOTIPO ---
     nadadores_df = aplicar_categoria_en_memoria(pd.DataFrame([
-        {'id_nadador': 1, 'nombre': 'Ana', 'grupo': 'Competitivo', 'categoria': 'Infantil B1', 'sexo': 'Femenino', 'anio_nacimiento': 2014, 'fecha_nacimiento': '2014-03-15', 'activo': True},
-        {'id_nadador': 2, 'nombre': 'Luis', 'grupo': 'Competitivo', 'categoria': 'Infantil A', 'sexo': 'Masculino', 'anio_nacimiento': 2015, 'activo': True},
-        {'id_nadador': 3, 'nombre': 'Carla', 'grupo': 'Precompetitivo', 'categoria': 'Juvenil A1', 'sexo': 'Femenino', 'anio_nacimiento': 2012, 'activo': True},
-        {'id_nadador': 4, 'nombre': 'Pedro', 'grupo': 'Elite', 'categoria': 'Mayores', 'sexo': 'Masculino', 'anio_nacimiento': None, 'activo': False},
+        {'id_nadador': 1, 'nombre': 'Ana', 'grupo': 'Competitivo', 'categoria': 'Infantil B1', 'sexo': 'Femenino', 'fecha_nacimiento': '2014-03-15', 'activo': True},
+        {'id_nadador': 2, 'nombre': 'Luis', 'grupo': 'Competitivo', 'categoria': 'Infantil A', 'sexo': 'Masculino', 'activo': True},
+        {'id_nadador': 3, 'nombre': 'Carla', 'grupo': 'Precompetitivo', 'categoria': 'Juvenil A1', 'sexo': 'Femenino', 'activo': True},
+        {'id_nadador': 4, 'nombre': 'Pedro', 'grupo': 'Elite', 'categoria': 'Mayores', 'sexo': 'Masculino', 'activo': False},
     ]))
     tiempos_df = pd.DataFrame([
         {'id_nadador': 1, 'fecha': '2023-10-15', 'lugar': 'Piscina Municipal', 'estilo': '50m Libre', 'tiempo_formateado': '00:28,50', 'segundos_totales': 28.5, 'tipo_piscina': 'Piscina Corta (25m)'},
@@ -1946,10 +1866,10 @@ def gestionar_nadadores():
             if faltan_fecha:
                 st.warning("Faltan nadadores con fecha de nacimiento: " + ", ".join(faltan_fecha))
         if puede_editar_fichas:
-            st.write("Edita el nombre, la fecha de nacimiento, el grupo y el sexo. La edad y la categoría se calculan solas: el fondo gris indica que esa celda no se edita.")
+            st.write("Edita el nombre, la fecha de nacimiento, el grupo, el sexo y Activo. La edad y la categoría no cambian hasta que aprietas Guardar perfiles. El fondo gris indica que esa celda no se edita.")
         else:
             st.info("La directiva ve las fichas y puede cambiar los nombres de los grupos en Configurar grupos. El nombre y la fecha los editan el entrenador y el master.")
-        st.caption("La fecha se escribe DD/MM/AAAA. La edad es la cumplida al 31 de diciembre y con ella se asigna la categoría. Sin fecha, la edad y la categoría quedan vacías. Desmarca Activo para ocultar a quien ya no viene: la ficha no se borra.")
+        st.caption("La fecha se escribe DD/MM/AAAA. Al guardar, la edad es la cumplida al 31 de diciembre y con ella se asigna la categoría. Sin fecha, la edad y la categoría quedan vacías. Desmarca Activo para ocultar a quien ya no viene: la ficha no se borra, y eso también se aplica al guardar.")
         if st.session_state.pop("perfil_guardado", False):
             st.success("Guardado. La categoría quedó calculada con la fecha de nacimiento.")
         df = st.session_state.nadadores_df.copy()
@@ -1959,7 +1879,6 @@ def gestionar_nadadores():
             df["activo"] = True
         else:
             df["activo"] = df["activo"].map(es_nadador_activo)
-        df = sugerir_anios_nacimiento(df)
         if "fecha_nacimiento" not in df.columns:
             df["fecha_nacimiento"] = ""
         df["fecha_nacimiento"] = df["fecha_nacimiento"].map(formatear_fecha_nacimiento)
@@ -1967,7 +1886,6 @@ def gestionar_nadadores():
             df["grupo"] = ""
         if "categoria" not in df.columns:
             df["categoria"] = ""
-        df = _proyectar_ediciones_perfiles(df, st.session_state.get("editor_perfiles"))
         df = con_edad_y_categoria(df)
         columnas_editor = ["nombre", "fecha_nacimiento", "edad", "categoria", "grupo", "sexo", "activo", "id_nadador"]
         df = df[columnas_editor]
@@ -1978,30 +1896,42 @@ def gestionar_nadadores():
                 opciones_grupo.append(grupo_extra)
         if "" not in opciones_grupo:
             opciones_grupo = [""] + opciones_grupo
-        edited_df = st.data_editor(
-            presentacion_perfiles(df, solo_lectura=not puede_editar_fichas),
-            use_container_width=True, num_rows="dynamic" if puede_editar_fichas else "fixed",
-            disabled=not puede_editar_fichas,
-            key="editor_perfiles",
-            column_config={
-                "id_nadador": None,
-                "nombre": st.column_config.TextColumn("Nombre"),
-                "fecha_nacimiento": st.column_config.TextColumn(
-                    "Fecha de nacimiento", help="DD/MM/AAAA"
-                ),
-                "edad": st.column_config.TextColumn(
-                    "Edad", disabled=True,
-                    help="Edad cumplida al 31 de diciembre. Define la categoría."
-                ),
-                "categoria": st.column_config.TextColumn("Categoría", disabled=True),
-                "grupo": st.column_config.SelectboxColumn("Grupo", options=opciones_grupo, required=True),
-                "sexo": st.column_config.SelectboxColumn(
-                    "Sexo", options=["Femenino", "Masculino"], required=True
-                ),
-                "activo": st.column_config.CheckboxColumn("Activo", default=True),
-            }
-        )
-        if puede_editar_fichas and st.button("Guardar Perfiles", type="primary"):
+        config_perfiles = {
+            "id_nadador": None,
+            "nombre": st.column_config.TextColumn("Nombre"),
+            "fecha_nacimiento": st.column_config.TextColumn(
+                "Fecha de nacimiento", help="DD/MM/AAAA"
+            ),
+            "edad": st.column_config.TextColumn(
+                "Edad", disabled=True,
+                help="Se calcula al guardar, con la edad cumplida al 31 de diciembre."
+            ),
+            "categoria": st.column_config.TextColumn("Categoría", disabled=True),
+            "grupo": st.column_config.SelectboxColumn("Grupo", options=opciones_grupo, required=True),
+            "sexo": st.column_config.SelectboxColumn(
+                "Sexo", options=["Femenino", "Masculino"], required=True
+            ),
+            "activo": st.column_config.CheckboxColumn("Activo", default=True),
+        }
+        if puede_editar_fichas:
+            with st.form("form_perfiles"):
+                edited_df = st.data_editor(
+                    presentacion_perfiles(df, solo_lectura=False),
+                    use_container_width=True, num_rows="dynamic",
+                    key="editor_perfiles",
+                    column_config=config_perfiles,
+                )
+                guardar_perfiles = st.form_submit_button("Guardar perfiles", type="primary")
+        else:
+            edited_df = st.data_editor(
+                presentacion_perfiles(df, solo_lectura=True),
+                use_container_width=True, num_rows="fixed",
+                disabled=True,
+                key="editor_perfiles_lectura",
+                column_config=config_perfiles,
+            )
+            guardar_perfiles = False
+        if guardar_perfiles:
             supabase = init_connection()
             if supabase:
                 errores = []
@@ -2024,26 +1954,28 @@ def gestionar_nadadores():
                         if fecha == "invalid":
                             errores.append(f"{nombre}: la fecha debe ir en formato DD/MM/AAAA.")
                             continue
-                        if fecha is None:
+                        if fecha is None and id_val is None:
                             errores.append(f"{nombre}: indica la fecha de nacimiento (DD/MM/AAAA).")
                             continue
-                        anio = fecha.year
-                        if anio < 1920 or anio > datetime.now().year:
-                            errores.append(f"{nombre}: el año {anio} no es válido.")
-                            continue
-                        cat = categoria_por_anio_nacimiento(anio)
-                        if not cat:
-                            errores.append(f"{nombre}: esa fecha no entra en una categoría FECHIDA.")
-                            continue
+                        cat = None
+                        if fecha is not None:
+                            anio = fecha.year
+                            if anio < 1920 or anio > datetime.now().year:
+                                errores.append(f"{nombre}: el año {anio} no es válido.")
+                                continue
+                            cat = categoria_por_anio_nacimiento(anio)
+                            if not cat:
+                                errores.append(f"{nombre}: esa fecha no entra en una categoría FECHIDA.")
+                                continue
                         rec = {
                             "nombre": nombre,
                             "sexo": sexo,
-                            "categoria": cat,
-                            "anio_nacimiento": anio,
-                            "fecha_nacimiento": fecha.strftime("%Y-%m-%d"),
+                            "fecha_nacimiento": None if fecha is None else fecha.strftime("%Y-%m-%d"),
                             "grupo": grupo,
                             "activo": es_nadador_activo(row.get("activo")),
                         }
+                        if cat:
+                            rec["categoria"] = cat
 
                         def _enviar(payload):
                             if id_val is not None:
@@ -2065,10 +1997,6 @@ def gestionar_nadadores():
                                     payload.pop("fecha_nacimiento", None)
                                     falta_columna = True
                                     continue
-                                if "anio_nacimiento" in payload and "anio_nacimiento" in msg:
-                                    payload.pop("anio_nacimiento", None)
-                                    falta_columna = True
-                                    continue
                                 if "activo" in payload and "activo" in msg:
                                     payload.pop("activo", None)
                                     falta_columna = True
@@ -2087,11 +2015,12 @@ def gestionar_nadadores():
                         fresh_df = aplicar_categoria_en_memoria(fresh_df)
                         st.session_state.nadadores_df = fresh_df
                     if falta_columna:
-                        st.warning("La base todavía no tiene alguna columna nueva (fecha de nacimiento, año o activo). El resto del perfil se guardó. Ejecuta las migraciones en Supabase antes de volver a guardar.")
+                        st.warning("La base todavía no tiene alguna columna nueva (fecha de nacimiento o activo). El resto del perfil se guardó.")
                     if errores:
                         st.error("No se guardaron algunas filas: " + " | ".join(errores))
                     elif not falta_columna:
                         st.session_state.perfil_guardado = True
+                        st.session_state.pop("editor_perfiles", None)
                         st.rerun()
                 except Exception as e:
                     st.error(f"Error Supabase guardando perfiles: {e}")
@@ -2103,16 +2032,19 @@ def gestionar_nadadores():
                 grupos_ok = editado["grupo"].map(lambda g: bool(_texto_limpio(g)))
                 if editado.empty:
                     st.error("No hay nadadores para guardar.")
-                elif (fechas == "invalid").any() or fechas.map(lambda f: f is None).any():
-                    st.error("Cada nadador necesita una fecha DD/MM/AAAA válida.")
+                elif (fechas == "invalid").any():
+                    st.error("La fecha debe ir en formato DD/MM/AAAA.")
                 elif not sexos_ok.all() or not grupos_ok.all():
                     st.error("Cada nadador necesita sexo y grupo.")
                 else:
                     editado = editado.drop(columns=["edad"], errors="ignore")
-                    editado["anio_nacimiento"] = fechas.map(lambda f: f.year)
-                    editado["fecha_nacimiento"] = fechas.map(lambda f: f.strftime("%Y-%m-%d"))
-                    editado["categoria"] = editado["anio_nacimiento"].map(categoria_por_anio_nacimiento)
+                    editado["fecha_nacimiento"] = fechas.map(lambda f: None if f is None else f.strftime("%Y-%m-%d"))
+                    editado["categoria"] = [
+                        categoria_por_anio_nacimiento(f.year) if f is not None else cat
+                        for f, cat in zip(fechas, editado["categoria"])
+                    ]
                     st.session_state.nadadores_df = aplicar_categoria_en_memoria(editado)
+                    st.session_state.pop("editor_perfiles", None)
                     st.success("Perfiles guardados en el Prototipo Temporal.")
 
     with tp2:

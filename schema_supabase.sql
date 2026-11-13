@@ -1,7 +1,7 @@
 -- ESTE ARCHIVO BORRA TODAS LAS TABLAS. Sirve solo para crear un proyecto vacío.
 -- En la base que ya está en uso, NO lo ejecutes: se pierden nadadores, tiempos y usuarios.
--- Para agregar el año de nacimiento en la base actual, ejecuta migracion_anio_nacimiento.sql.
 -- Para la fecha completa y el catálogo de grupos, ejecuta migracion_grupos_y_fecha.sql.
+-- Para quitar la columna del año en la base que ya está en uso, ejecuta migracion_quitar_anio_nacimiento.sql.
 --
 -- BORRADO PREVIO PARA EVITAR ERRORES (CASCADE borra las tablas que dependen de ellos)
 DROP TABLE IF EXISTS asistencias, tiempos, nadadores, grupos, marcas_minimas, usuarios, incidencias_clase, tests, resultados_test, datos_fisicos, tiempos_entrenamiento CASCADE;
@@ -51,7 +51,6 @@ CREATE TABLE nadadores (
     grupo VARCHAR(50), 
     categoria tipo_categoria NOT NULL,
     sexo tipo_sexo DEFAULT 'Masculino',
-    anio_nacimiento INTEGER,
     fecha_nacimiento DATE,
     activo BOOLEAN DEFAULT true
 );
