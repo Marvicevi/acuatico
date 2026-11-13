@@ -99,9 +99,19 @@ def _anio_entero(valor):
         return None
 
 
-def serie_id(serie):
-    """Entero que admite vacíos, para cruzar cuentas y fichas sin romper la página."""
-    return pd.to_numeric(serie, errors="coerce").astype("Int64")
+def fichas_por_id(nadadores):
+    """Nombre de la ficha según su id. Los vacíos no entran."""
+    if nadadores is None or getattr(nadadores, "empty", True):
+        return {}
+    if "id_nadador" not in nadadores.columns or "nombre" not in nadadores.columns:
+        return {}
+    return {
+        clave: nombre
+        for clave, nombre in (
+            (_anio_entero(i), n) for i, n in zip(nadadores["id_nadador"], nadadores["nombre"])
+        )
+        if clave is not None
+    }
 
 
 def anio_temporada_actual():
@@ -2393,11 +2403,14 @@ def panel_master():
     st.markdown("---")
     st.subheader("Directorio de Usuarios Activos")
     directorio = st.session_state.usuarios_df.copy()
-    if "id_nadador" in directorio.columns and not st.session_state.nadadores_df.empty:
-        nombres = st.session_state.nadadores_df[["id_nadador", "nombre"]].rename(columns={"nombre": "ficha"})
-        directorio["id_nadador"] = serie_id(directorio["id_nadador"])
-        nombres["id_nadador"] = serie_id(nombres["id_nadador"])
-        directorio = directorio.merge(nombres, on="id_nadador", how="left")
+    try:
+        if "id_nadador" in directorio.columns:
+            nombres = fichas_por_id(st.session_state.nadadores_df)
+            directorio["ficha"] = [
+                nombres.get(_anio_entero(valor)) for valor in directorio["id_nadador"]
+            ]
+    except Exception:
+        directorio["ficha"] = ""
     columnas_dir = [c for c in ["id_usuario", "nombre", "email", "rol", "ficha"] if c in directorio.columns]
     st.dataframe(directorio[columnas_dir], hide_index=True, use_container_width=True)
 
@@ -2432,11 +2445,13 @@ def mostrar_tests():
                         res_t = res_df[res_df['id_test'] == t_id]
                         if not res_t.empty:
                             st.markdown("**Resultados:**")
-                            nad_ref = st.session_state.nadadores_df[['id_nadador', 'nombre']].copy()
+                            nombres = fichas_por_id(st.session_state.nadadores_df)
                             res_t = res_t.copy()
-                            res_t['id_nadador'] = serie_id(res_t['id_nadador'])
-                            nad_ref['id_nadador'] = serie_id(nad_ref['id_nadador'])
-                            merged = res_t.merge(nad_ref, on='id_nadador', how='left') if 'id_nadador' in res_t.columns else res_t
+                            if 'id_nadador' in res_t.columns:
+                                res_t['nombre'] = [
+                                    nombres.get(_anio_entero(valor)) for valor in res_t['id_nadador']
+                                ]
+                            merged = res_t
                             cols_r = [c for c in ['nombre', 'resultado', 'observaciones'] if c in merged.columns]
                             st.dataframe(merged[cols_r], use_container_width=True, hide_index=True)
                         else:
