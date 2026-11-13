@@ -99,6 +99,11 @@ def _anio_entero(valor):
         return None
 
 
+def serie_id(serie):
+    """Entero que admite vacíos, para cruzar cuentas y fichas sin romper la página."""
+    return pd.to_numeric(serie, errors="coerce").astype("Int64")
+
+
 def anio_temporada_actual():
     """Año cuyos 31 de diciembre definen la categoría vigente."""
     return datetime.now().year
@@ -1772,6 +1777,17 @@ def gestionar_nadadores():
     tp1, tp2, tp3 = st.tabs(["Perfiles", "📏 Datos Fisiológicos", "Configurar grupos"])
 
     with tp1:
+        fichas_aviso = st.session_state.nadadores_df
+        if fichas_aviso is not None and not fichas_aviso.empty and "nombre" in fichas_aviso.columns:
+            if "fecha_nacimiento" in fichas_aviso.columns:
+                faltan_fecha = [
+                    str(n) for n, f in zip(fichas_aviso["nombre"], fichas_aviso["fecha_nacimiento"])
+                    if not _texto_limpio(formatear_fecha_nacimiento(f)) and pd.notna(n) and str(n).strip()
+                ]
+            else:
+                faltan_fecha = [str(n) for n in fichas_aviso["nombre"] if pd.notna(n) and str(n).strip()]
+            if faltan_fecha:
+                st.warning("Faltan nadadores con fecha de nacimiento: " + ", ".join(faltan_fecha))
         if puede_editar_fichas:
             st.write("Edita el nombre, la fecha de nacimiento, el grupo y el sexo. La edad y la categoría se calculan solas: el fondo gris indica que esa celda no se edita.")
         else:
@@ -1798,12 +1814,6 @@ def gestionar_nadadores():
         df = con_edad_y_categoria(df)
         columnas_editor = ["nombre", "fecha_nacimiento", "edad", "categoria", "grupo", "sexo", "activo", "id_nadador"]
         df = df[columnas_editor]
-        faltan_fecha = [
-            str(n) for n, f in zip(df["nombre"], df["fecha_nacimiento"])
-            if not _texto_limpio(f) and pd.notna(n) and str(n).strip()
-        ]
-        if faltan_fecha:
-            st.warning("Falta la fecha de nacimiento completa (DD/MM/AAAA) de: " + ", ".join(faltan_fecha))
         opciones_grupo = lista_grupos()
         df["grupo"] = df["grupo"].map(_texto_limpio)
         for grupo_extra in df["grupo"].tolist():
@@ -2364,6 +2374,8 @@ def panel_master():
     directorio = st.session_state.usuarios_df.copy()
     if "id_nadador" in directorio.columns and not st.session_state.nadadores_df.empty:
         nombres = st.session_state.nadadores_df[["id_nadador", "nombre"]].rename(columns={"nombre": "ficha"})
+        directorio["id_nadador"] = serie_id(directorio["id_nadador"])
+        nombres["id_nadador"] = serie_id(nombres["id_nadador"])
         directorio = directorio.merge(nombres, on="id_nadador", how="left")
     columnas_dir = [c for c in ["id_usuario", "nombre", "email", "rol", "ficha"] if c in directorio.columns]
     st.dataframe(directorio[columnas_dir], hide_index=True, use_container_width=True)
@@ -2399,7 +2411,10 @@ def mostrar_tests():
                         res_t = res_df[res_df['id_test'] == t_id]
                         if not res_t.empty:
                             st.markdown("**Resultados:**")
-                            nad_ref = st.session_state.nadadores_df[['id_nadador', 'nombre']]
+                            nad_ref = st.session_state.nadadores_df[['id_nadador', 'nombre']].copy()
+                            res_t = res_t.copy()
+                            res_t['id_nadador'] = serie_id(res_t['id_nadador'])
+                            nad_ref['id_nadador'] = serie_id(nad_ref['id_nadador'])
                             merged = res_t.merge(nad_ref, on='id_nadador', how='left') if 'id_nadador' in res_t.columns else res_t
                             cols_r = [c for c in ['nombre', 'resultado', 'observaciones'] if c in merged.columns]
                             st.dataframe(merged[cols_r], use_container_width=True, hide_index=True)
